@@ -11,4 +11,7 @@ describe("parseArgs", () => {
   it("不明コマンドは cmd=help", () => {
     expect(parseArgs(["wat"]).cmd).toBe("help");
   });
+  it("seed --plan と --dry-run を解釈する", () => {
+    expect(parseArgs(["seed", "--plan", "p.json", "--dry-run"])).toEqual({ cmd: "seed", dryRun: true, planPath: "p.json" });
+  });
 });
