@@ -1,0 +1,97 @@
+import type { BacklogConfig } from "../types.js";
+import { RateLimiter, type RateCategory } from "./rate-limiter.js";
+
+export interface IssueRef { id: number; issueKey: string; }
+export interface StatusDef { id: number; name: string; }
+export interface CreateIssueInput {
+  projectId: number; summary: string; issueTypeId: number; priorityId: number;
+  description?: string; parentIssueId?: number; assigneeId?: number;
+}
+export interface UpdateIssueInput {
+  issueIdOrKey: string | number; statusId?: number; comment?: string; summary?: string; description?: string; resolutionId?: number;
+}
+
+interface Deps { fetch?: typeof fetch; rateLimiter?: Pick<RateLimiter, "beforeRequest" | "handle429">; }
+
+export class BacklogRest {
+  private readonly fetch: typeof fetch;
+  private readonly rl: Pick<RateLimiter, "beforeRequest" | "handle429">;
+  constructor(private readonly cfg: BacklogConfig, deps: Deps = {}) {
+    this.fetch = deps.fetch ?? fetch;
+    this.rl = deps.rateLimiter ?? new RateLimiter();
+  }
+
+  private base(path: string): string {
+    return `https://${this.cfg.domain}/api/v2${path}`;
+  }
+
+  private form(params: Record<string, unknown>): string {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null) continue;
+      sp.append(k, String(v));
+    }
+    return sp.toString();
+  }
+
+  private async request(method: string, path: string, category: RateCategory, body?: Record<string, unknown>): Promise<any> {
+    const url = `${this.base(path)}?apiKey=${encodeURIComponent(this.cfg.apiKey)}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this.rl.beforeRequest(category);
+      const init: RequestInit = { method };
+      if (body) {
+        init.body = this.form(body);
+        init.headers = { "content-type": "application/x-www-form-urlencoded" };
+      }
+      const res = await this.fetch(url, init);
+      if (res.status === 429 && attempt === 0) {
+        await this.rl.handle429(res.headers);
+        continue;
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`Backlog ${method} ${path} -> ${res.status} ${text}`);
+      }
+      return res.json();
+    }
+    throw new Error(`Backlog ${method} ${path} -> 429 (リトライ上限)`);
+  }
+
+  async getMyself(): Promise<{ id: number; name: string }> {
+    return this.request("GET", "/users/myself", "read");
+  }
+
+  async getProjectStatuses(projectKey: string): Promise<StatusDef[]> {
+    return this.request("GET", `/projects/${encodeURIComponent(projectKey)}/statuses`, "read");
+  }
+
+  async createIssue(input: CreateIssueInput): Promise<IssueRef> {
+    const r = await this.request("POST", "/issues", "write", input as unknown as Record<string, unknown>);
+    return { id: r.id, issueKey: r.issueKey };
+  }
+
+  async updateIssue(input: UpdateIssueInput): Promise<void> {
+    const { issueIdOrKey, ...rest } = input;
+    await this.request("PATCH", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "write", rest as unknown as Record<string, unknown>);
+  }
+
+  async addComment(issueIdOrKey: string | number, content: string): Promise<void> {
+    await this.request("POST", `/issues/${encodeURIComponent(String(issueIdOrKey))}/comments`, "write", { content });
+  }
+
+  async findIssues(query: { projectId?: number; keyword?: string; assigneeId?: number[]; updatedSince?: string; count?: number }): Promise<IssueRef[]> {
+    const sp = new URLSearchParams();
+    sp.append("apiKey", this.cfg.apiKey);
+    if (query.projectId) sp.append("projectId[]", String(query.projectId));
+    if (query.keyword) sp.append("keyword", query.keyword);
+    if (query.updatedSince) sp.append("updatedSince", query.updatedSince);
+    for (const a of query.assigneeId ?? []) sp.append("assigneeId[]", String(a));
+    sp.append("count", String(query.count ?? 50));
+    await this.rl.beforeRequest("search");
+    const res = await this.fetch(`${this.base("/issues")}?${sp.toString()}`);
+    if (res.status === 429) { await this.rl.handle429(res.headers); }
+    if (!res.ok) throw new Error(`Backlog GET /issues -> ${res.status}`);
+    const arr = (await res.json()) as Array<{ id: number; issueKey: string }>;
+    return arr.map((x) => ({ id: x.id, issueKey: x.issueKey }));
+  }
+}
