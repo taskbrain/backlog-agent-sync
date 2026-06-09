@@ -1,0 +1,45 @@
+import type { StatusMap } from "../types.js";
+import type { TrackerAdapter } from "./adapter.js";
+import type { BacklogRest, IssueRef, CreateIssueInput } from "./backlog-rest.js";
+
+// Backlog 既定ステータス名 → 正準キー。カスタム名は displayOrder で近似。
+const NAME_TO_KEY: Record<string, keyof StatusMap> = {
+  "未対応": "open", "open": "open",
+  "処理中": "in_progress", "in progress": "in_progress",
+  "処理済み": "resolved", "resolved": "resolved",
+  "完了": "closed", "closed": "closed",
+};
+
+export class BacklogAdapter implements TrackerAdapter {
+  constructor(private readonly rest: Pick<BacklogRest, "getProjectStatuses" | "createIssue" | "updateIssue" | "addComment" | "findIssues">, private readonly projectKey: string) {}
+
+  async getStatusMap(): Promise<StatusMap> {
+    const statuses = await this.rest.getProjectStatuses(this.projectKey);
+    const map: StatusMap = { open: 0, in_progress: 0, resolved: 0, closed: 0 };
+    for (const s of statuses) {
+      const key = NAME_TO_KEY[s.name.trim().toLowerCase()] ?? NAME_TO_KEY[s.name.trim()];
+      if (key) map[key] = s.id;
+    }
+    // 取得できなかったキーは displayOrder（配列順）でフォールバック
+    const order: (keyof StatusMap)[] = ["open", "in_progress", "resolved", "closed"];
+    order.forEach((k, i) => { if (!map[k] && statuses[i]) map[k] = statuses[i].id; });
+    return map;
+  }
+
+  createIssue(input: CreateIssueInput): Promise<IssueRef> {
+    return this.rest.createIssue(input);
+  }
+
+  async setStatus(issueIdOrKey: string | number, statusId: number, comment?: string): Promise<void> {
+    await this.rest.updateIssue({ issueIdOrKey, statusId, ...(comment ? { comment } : {}) });
+  }
+
+  async addComment(issueIdOrKey: string | number, content: string): Promise<void> {
+    await this.rest.addComment(issueIdOrKey, content);
+  }
+
+  async findByMarker(marker: string): Promise<IssueRef | undefined> {
+    const found = await this.rest.findIssues({ keyword: marker, count: 1 });
+    return found[0];
+  }
+}
