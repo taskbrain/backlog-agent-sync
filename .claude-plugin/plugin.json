@@ -1,0 +1,25 @@
+{
+  "name": "backlog-agent-sync",
+  "description": "Mirror agent sessions into Backlog issues in real time (fully local).",
+  "userConfig": {
+    "BACKLOG_DOMAIN": {
+      "type": "string",
+      "title": "Backlog Domain",
+      "description": "例: your-space.backlog.com / .jp",
+      "required": true
+    },
+    "BACKLOG_API_KEY": {
+      "type": "string",
+      "title": "Backlog API Key",
+      "description": "Backlog スペースの個人設定で発行した API キー",
+      "sensitive": true,
+      "required": true
+    },
+    "BACKLOG_PROJECT": {
+      "type": "string",
+      "title": "Backlog Project Key",
+      "description": "同期対象プロジェクトのキー（例: PROJ）",
+      "required": true
+    }
+  }
+}

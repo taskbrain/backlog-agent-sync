@@ -1,0 +1,7 @@
+{
+  "name": "backlog-agent-sync",
+  "owner": { "name": "Kazuma Sakane", "email": "sakane@taskbrain.co.jp" },
+  "plugins": [
+    { "name": "backlog-agent-sync", "source": "./" }
+  ]
+}

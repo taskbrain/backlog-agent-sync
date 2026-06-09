@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/backlog-sync hook session-start", "timeout": 20 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/backlog-sync hook post-tool", "async": true } ] }
+    ],
+    "Stop": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/backlog-sync hook stop", "async": true } ] }
+    ],
+    "SessionEnd": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/backlog-sync hook session-end", "async": true } ] }
+    ]
+  }
+}
