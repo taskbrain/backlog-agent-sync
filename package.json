@@ -1,0 +1,20 @@
+{
+  "name": "backlog-agent-sync",
+  "version": "0.0.0",
+  "description": "Mirror Claude Code / Codex agent sessions into Backlog issues in real time (fully local).",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "backlog-sync": "bin/backlog-sync" },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^20.16.0"
+  }
+}
