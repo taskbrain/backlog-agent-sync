@@ -1,4 +1,5 @@
-import { resolveConfig, stateDirFor } from "./config.js";
+import { readFile } from "node:fs/promises";
+import { resolveConfig, stateDirFor, projectConfigPath } from "./config.js";
 import { StateStore } from "./state/store.js";
 import { BacklogRest } from "./tracker/backlog-rest.js";
 import { BacklogAdapter } from "./tracker/backlog-adapter.js";
@@ -9,8 +10,15 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
   const rest = new BacklogRest(cfg);
   const adapter = new BacklogAdapter(rest, cfg.projectKey);
   const store = new StateStore(stateDirFor(cwd));
-  // projectId は project.json があれば読む（無ければ find/プロジェクト解決は P1 検証時に補完）。
-  const projectId = Number(process.env.BACKLOG_PROJECT_ID ?? 0);
+  // projectId は init が書く project.json を優先し、無ければ env、無ければ 0。
+  let projectId = Number(process.env.BACKLOG_PROJECT_ID ?? 0);
+  try {
+    const raw = await readFile(projectConfigPath(cwd), "utf8");
+    const pj = JSON.parse(raw) as { projectId?: number };
+    if (pj.projectId) projectId = pj.projectId;
+  } catch {
+    // project.json 未作成: env または 0 にフォールバック
+  }
   const deps: LifecycleDeps = { store, adapter, projectId };
   return { deps, rest, projectKey: cfg.projectKey };
 }

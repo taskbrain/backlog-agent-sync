@@ -3,6 +3,7 @@ import { RateLimiter, type RateCategory } from "./rate-limiter.js";
 
 export interface IssueRef { id: number; issueKey: string; }
 export interface StatusDef { id: number; name: string; }
+export interface ProjectRef { id: number; projectKey: string; name: string; }
 export interface CreateIssueInput {
   projectId: number; summary: string; issueTypeId: number; priorityId: number;
   description?: string; parentIssueId?: number; assigneeId?: number;
@@ -52,13 +53,19 @@ export class BacklogRest {
         const text = await res.text().catch(() => "");
         throw new Error(`Backlog ${method} ${path} -> ${res.status} ${text}`);
       }
-      return res.json();
+      const text = await res.text();
+      return text ? JSON.parse(text) : {};
     }
     throw new Error(`Backlog ${method} ${path} -> 429 (リトライ上限)`);
   }
 
   async getMyself(): Promise<{ id: number; name: string }> {
     return this.request("GET", "/users/myself", "read");
+  }
+
+  async getProject(projectIdOrKey: string | number): Promise<ProjectRef> {
+    const r = await this.request("GET", `/projects/${encodeURIComponent(String(projectIdOrKey))}`, "read");
+    return { id: r.id, projectKey: r.projectKey, name: r.name };
   }
 
   async getProjectStatuses(projectKey: string): Promise<StatusDef[]> {
@@ -87,11 +94,15 @@ export class BacklogRest {
     if (query.updatedSince) sp.append("updatedSince", query.updatedSince);
     for (const a of query.assigneeId ?? []) sp.append("assigneeId[]", String(a));
     sp.append("count", String(query.count ?? 50));
-    await this.rl.beforeRequest("search");
-    const res = await this.fetch(`${this.base("/issues")}?${sp.toString()}`);
-    if (res.status === 429) { await this.rl.handle429(res.headers); }
-    if (!res.ok) throw new Error(`Backlog GET /issues -> ${res.status}`);
-    const arr = (await res.json()) as Array<{ id: number; issueKey: string }>;
-    return arr.map((x) => ({ id: x.id, issueKey: x.issueKey }));
+    const url = `${this.base("/issues")}?${sp.toString()}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this.rl.beforeRequest("search");
+      const res = await this.fetch(url);
+      if (res.status === 429 && attempt === 0) { await this.rl.handle429(res.headers); continue; }
+      if (!res.ok) throw new Error(`Backlog GET /issues -> ${res.status}`);
+      const arr = (await res.json()) as Array<{ id: number; issueKey: string }>;
+      return arr.map((x) => ({ id: x.id, issueKey: x.issueKey }));
+    }
+    throw new Error(`Backlog GET /issues -> 429 (リトライ上限)`);
   }
 }

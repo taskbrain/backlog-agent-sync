@@ -38,4 +38,23 @@ describe("BacklogRest", () => {
     expect(handle429).toHaveBeenCalledOnce();
     expect(ref.issueKey).toBe("PROJ-1");
   });
+
+  it("getProject は GET /projects/:key を呼び id を返す", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 77, projectKey: "PROJ", name: "P" }));
+    const rest = new BacklogRest(cfg, { fetch: fetchMock, rateLimiter: { beforeRequest: async () => {}, handle429: async () => {} } as any });
+    const p = await rest.getProject("PROJ");
+    expect(p.id).toBe(77);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v2/projects/PROJ");
+  });
+
+  it("findIssues は 429 後にリトライする", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonRes([], 429, { "X-RateLimit-Reset": "0" }))
+      .mockResolvedValueOnce(jsonRes([{ id: 1, issueKey: "PROJ-1" }]));
+    const handle429 = vi.fn().mockResolvedValue(undefined);
+    const rest = new BacklogRest(cfg, { fetch: fetchMock, rateLimiter: { beforeRequest: async () => {}, handle429 } as any });
+    const found = await rest.findIssues({ keyword: "x" });
+    expect(handle429).toHaveBeenCalledOnce();
+    expect(found[0].issueKey).toBe("PROJ-1");
+  });
 });
