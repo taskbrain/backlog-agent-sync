@@ -1,12 +1,24 @@
-# backlog-agent-sync — Codex CLI wiring 設定例
+# backlog-agent-sync — Codex CLI wiring 設定例（MCP のみ）
 #
 # install/install-codex.sh が ~/.codex/config.toml へ自動マージする。
-# 手動で導入する場合は本ファイルの内容を ~/.codex/config.toml へ追記し、
-# /path/to/backlog-agent-sync を本リポジトリの実際の絶対パスへ置き換えること。
+# 手動で導入する場合は本ファイルの内容を ~/.codex/config.toml へ追記すること。
 #
-# 前提（シェル環境変数。値を config へ直接書かない・コミット禁止）:
+# 【重要】フックは config.toml の [[hooks.*]] では定義しない。
+# Codex CLI（0.137.0 実機検証）は config.toml 内のフック定義を trust せず
+# 黙ってスキップするため機能しない。正しい方式:
+#   1. フック定義を ~/.codex/hooks.json に置く（例: codex/hooks.json.example）
+#   2. config.toml の
+#        [hooks.state."<hooks.jsonの絶対パス>:<event_label>:<groupIndex>:<handlerIndex>"]
+#      に trusted_hash = "sha256:..." を登録する（event_label は snake_case:
+#      session_start / post_tool_use / subagent_stop / stop）
+# このマージとハッシュ計算は install/install-codex.sh（内部で
+# install/codex-register.mjs を呼ぶ）が自動で行う。手動での承認は不要。
+#
+# 前提（シェル環境変数。値を config へ直接書かない・コミット禁止。
+# フックのサブプロセスへは親シェルの環境変数がそのまま渡る）:
 #   export BACKLOG_DOMAIN="your-space.backlog.com"   # または your-space.backlog.jp
 #   export BACKLOG_API_KEY="..."                     # 個人 API キー
+#   export BACKLOG_PROJECT="PROJ"                    # フック CLI が使用
 
 # --- Backlog MCP（意味的同期 / ceiling） ---
 # env_vars: ローカルシェルの環境変数を MCP サーバへ転送する whitelist（値は書かない）
@@ -16,39 +28,3 @@ command = "npx"
 args = ["backlog-mcp-server@0.12.0"]
 env = { ENABLE_TOOLSETS = "space,project,issue" }
 env_vars = ["BACKLOG_DOMAIN", "BACKLOG_API_KEY"]
-
-# --- フック（決定論同期 / floor） ---
-# Codex のフックは command ハンドラのみ（設計 付録A）。Claude Code と同一の
-# backlog-sync CLI を起動し、同じ floor 経路（Backlog REST 直叩き）を通す。
-# 注: Codex に SessionEnd フックは無い。オフラインキューの排出は Stop 時の
-#     drain と `backlog-sync flush` で代替する。
-
-[[hooks.SessionStart]]
-
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook session-start'
-timeout = 30
-statusMessage = "Backlog: session sync"
-
-[[hooks.PostToolUse]]
-
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook post-tool'
-timeout = 30
-
-[[hooks.SubagentStop]]
-
-[[hooks.SubagentStop.hooks]]
-type = "command"
-command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook subagent-stop'
-timeout = 30
-
-[[hooks.Stop]]
-
-[[hooks.Stop.hooks]]
-type = "command"
-command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook stop'
-timeout = 60
-statusMessage = "Backlog: session summary"

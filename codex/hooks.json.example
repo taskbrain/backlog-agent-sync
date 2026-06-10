@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/path/to/backlog-agent-sync/bin/backlog-sync\" hook session-start",
+            "timeout": 30,
+            "statusMessage": "Backlog: session sync"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/path/to/backlog-agent-sync/bin/backlog-sync\" hook post-tool",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/path/to/backlog-agent-sync/bin/backlog-sync\" hook subagent-stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/path/to/backlog-agent-sync/bin/backlog-sync\" hook stop",
+            "timeout": 60,
+            "statusMessage": "Backlog: session summary"
+          }
+        ]
+      }
+    ]
+  }
+}
