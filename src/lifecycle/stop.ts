@@ -1,11 +1,20 @@
 import type { CanonicalEvent } from "../types.js";
-import type { LifecycleDeps, HookOutput } from "./session-start.js";
+import { ensureSessionIssue, type LifecycleDeps, type HookOutput } from "./session-start.js";
 
 export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<HookOutput> {
   if (ev.stopHookActive) return {}; // 既にこのフックでブロック中: 何もしない
   const { store, adapter } = deps;
   const st = await store.loadOrCreate(ev.sessionId);
-  if (!st.issueKey) return {};
+
+  // SessionStart が発火しない環境（Codex exec 等）向けの遅延 find-or-create
+  let ensured: string | undefined;
+  try {
+    ensured = await ensureSessionIssue(ev, deps, st);
+  } catch {
+    // 作成失敗（オフライン/権限等）は非ブロッキングで no-op（init 未解決時は undefined が返る）
+  }
+  if (!ensured) return {};
+  const issueKey = ensured; // const 化（drain クロージャ内での narrowing 維持）
 
   const entries = st.activityBuffer;
   const lines = entries.map((e) => `- ${e.ts.slice(11, 16)} ${e.tool}`).join("\n");
@@ -20,8 +29,8 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
 
   // drain は失敗 op を attempts++ で残置するため、オフラインでも例外を伝播しない
   await store.drain(ev.sessionId, async (op) => {
-    if (op.op === "add_comment") { await adapter.addComment(st.issueKey!, String(op.payload.content)); return true; }
-    if (op.op === "update_issue") { await adapter.setStatus(st.issueKey!, Number(op.payload.statusId), undefined); return true; }
+    if (op.op === "add_comment") { await adapter.addComment(issueKey, String(op.payload.content)); return true; }
+    if (op.op === "update_issue") { await adapter.setStatus(issueKey, Number(op.payload.statusId), undefined); return true; }
     return true;
   });
   return {};

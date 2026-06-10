@@ -52,4 +52,31 @@ describe("runSubagentStop", () => {
     await runSubagentStop({ tool: "claude", event: "subagent-stop", sessionId: "s1", cwd: "/r", agentType: "tester", toolUseId: "t1", raw: {} }, { store, adapter: adapter as any, projectId: 10 });
     expect(adapter.addComment).not.toHaveBeenCalled();
   });
+
+  it("issueKey 無しでも遅延作成してコメントを投稿する（Codex exec パリティ）", async () => {
+    const store = new StateStore(dir);
+    // SessionStart は発火していない（issueKey 無し）。post-tool のバッファのみ存在
+    await runPostTool({ tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", toolName: "Edit", toolUseId: "a", raw: {} }, { store, adapter: {} as any, projectId: 10 });
+    const adapter = adapterWithIssue();
+    adapter.createIssue.mockResolvedValue({ id: 100, issueKey: "PROJ-100" });
+    await runSubagentStop(
+      { tool: "claude", event: "subagent-stop", sessionId: "s1", cwd: "/r", agentType: "tester", toolUseId: "t1", raw: {} },
+      { store, adapter: adapter as any, projectId: 10, issueTypeId: 4236190, priorityId: 3 },
+    );
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    expect(adapter.addComment).toHaveBeenCalledOnce(); // 集約コメント
+    const st = await store.loadOrCreate("s1");
+    expect(st.issueKey).toBe("PROJ-100");
+  });
+
+  it("バッファが空なら遅延作成もしない（空課題のノイズ防止）", async () => {
+    const store = new StateStore(dir);
+    const adapter = adapterWithIssue();
+    await runSubagentStop(
+      { tool: "claude", event: "subagent-stop", sessionId: "s1", cwd: "/r", agentType: "tester", toolUseId: "t1", raw: {} },
+      { store, adapter: adapter as any, projectId: 10, issueTypeId: 4236190, priorityId: 3 },
+    );
+    expect(adapter.createIssue).not.toHaveBeenCalled();
+    expect(adapter.addComment).not.toHaveBeenCalled();
+  });
 });
