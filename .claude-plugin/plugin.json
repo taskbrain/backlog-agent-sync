@@ -1,6 +1,11 @@
 {
   "name": "backlog-agent-sync",
+  "version": "0.1.0",
   "description": "Mirror agent sessions into Backlog issues in real time (fully local).",
+  "author": {
+    "name": "Kazuma Sakane",
+    "email": "sakane@taskbrain.co.jp"
+  },
   "userConfig": {
     "BACKLOG_DOMAIN": {
       "type": "string",
