@@ -5,6 +5,7 @@ import { runSubagentStop } from "./lifecycle/subagent-stop.js";
 import { runStop } from "./lifecycle/stop.js";
 import { runSessionEnd } from "./lifecycle/session-end.js";
 import type { LifecycleEvent } from "./types.js";
+import type { SeedLedger } from "./seed/apply.js";
 
 export interface ParsedArgs { cmd: string; event?: LifecycleEvent; dryRun?: boolean; planPath?: string; sessionId?: string; }
 
@@ -74,13 +75,24 @@ export async function main(argv: string[]): Promise<void> {
       planRaw = await readStdin();
     }
     const { applySeed } = await import("./seed/apply.js");
+    const { loadSeedLedger, saveSeedLedger } = await import("./seed/ledger.js");
+    const { seedLedgerPath } = await import("./config.js");
+    const ledgerPath = seedLedgerPath(cwd);
     const plan = {
       projectId: planRaw.projectId ?? deps.projectId,
       issueTypeId: planRaw.issueTypeId,
       priorityId: planRaw.priorityId,
       epics: planRaw.epics ?? [],
     };
-    const res = await applySeed(plan as any, { adapter: deps.adapter, dryRun: parsed.dryRun, defaultIssueTypeId: deps.issueTypeId, defaultPriorityId: deps.priorityId });
+    const res = await applySeed(plan as any, {
+      adapter: deps.adapter,
+      dryRun: parsed.dryRun,
+      defaultIssueTypeId: deps.issueTypeId,
+      defaultPriorityId: deps.priorityId,
+      // 台帳はプレビュー精度のため常に読む。保存は dry-run では行わない
+      loadLedger: () => loadSeedLedger(ledgerPath),
+      ...(parsed.dryRun ? {} : { saveLedger: (l: SeedLedger) => saveSeedLedger(ledgerPath, l) }),
+    });
     process.stdout.write(JSON.stringify(res, null, 2) + "\n");
     return;
   }

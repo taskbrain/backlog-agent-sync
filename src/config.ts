@@ -20,3 +20,7 @@ export function stateDirFor(cwd: string): string {
 export function projectConfigPath(cwd: string): string {
   return join(cwd, ".claude", "backlog-agent-sync", "project.json");
 }
+
+export function seedLedgerPath(cwd: string): string {
+  return join(cwd, ".claude", "backlog-agent-sync", "seed-ledger.json");
+}
