@@ -1,0 +1,54 @@
+# backlog-agent-sync — Codex CLI wiring 設定例
+#
+# install/install-codex.sh が ~/.codex/config.toml へ自動マージする。
+# 手動で導入する場合は本ファイルの内容を ~/.codex/config.toml へ追記し、
+# /path/to/backlog-agent-sync を本リポジトリの実際の絶対パスへ置き換えること。
+#
+# 前提（シェル環境変数。値を config へ直接書かない・コミット禁止）:
+#   export BACKLOG_DOMAIN="your-space.backlog.com"   # または your-space.backlog.jp
+#   export BACKLOG_API_KEY="..."                     # 個人 API キー
+
+# --- Backlog MCP（意味的同期 / ceiling） ---
+# env_vars: ローカルシェルの環境変数を MCP サーバへ転送する whitelist（値は書かない）
+# ENABLE_TOOLSETS: 露出を space,project,issue に限定（wiki/git/document/notifications 無効）
+[mcp_servers.backlog]
+command = "npx"
+args = ["backlog-mcp-server@0.12.0"]
+env = { ENABLE_TOOLSETS = "space,project,issue" }
+env_vars = ["BACKLOG_DOMAIN", "BACKLOG_API_KEY"]
+
+# --- フック（決定論同期 / floor） ---
+# Codex のフックは command ハンドラのみ（設計 付録A）。Claude Code と同一の
+# backlog-sync CLI を起動し、同じ floor 経路（Backlog REST 直叩き）を通す。
+# 注: Codex に SessionEnd フックは無い。オフラインキューの排出は Stop 時の
+#     drain と `backlog-sync flush` で代替する。
+
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook session-start'
+timeout = 30
+statusMessage = "Backlog: session sync"
+
+[[hooks.PostToolUse]]
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook post-tool'
+timeout = 30
+
+[[hooks.SubagentStop]]
+
+[[hooks.SubagentStop.hooks]]
+type = "command"
+command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook subagent-stop'
+timeout = 30
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = '"/path/to/backlog-agent-sync/bin/backlog-sync" hook stop'
+timeout = 60
+statusMessage = "Backlog: session summary"
