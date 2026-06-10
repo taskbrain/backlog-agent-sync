@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { SessionState, StatusMap, QueuedOp } from "../types.js";
@@ -66,6 +66,26 @@ export class StateStore {
       release();
       if (this.locks.get(sessionId) === next) this.locks.delete(sessionId);
     }
+  }
+
+  /** state ディレクトリ内の全セッション状態を読む（ディレクトリ無し→空、破損ファイルはスキップ）。 */
+  async listSessions(): Promise<SessionState[]> {
+    let files: string[];
+    try {
+      files = await readdir(this.dir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw e;
+    }
+    const out: SessionState[] = [];
+    for (const f of files.filter((n) => n.endsWith(".json")).sort()) {
+      try {
+        out.push(JSON.parse(await readFile(join(this.dir, f), "utf8")) as SessionState);
+      } catch {
+        // 破損/書込途中のファイルはスキップ
+      }
+    }
+    return out;
   }
 
   async markProcessed(sessionId: string, key: string): Promise<boolean> {

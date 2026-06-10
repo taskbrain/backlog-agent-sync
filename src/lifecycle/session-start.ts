@@ -1,6 +1,7 @@
 import type { CanonicalEvent } from "../types.js";
 import type { StateStore } from "../state/store.js";
 import type { TrackerAdapter } from "../tracker/adapter.js";
+import { runPull, formatDigest, type PullRest } from "../inbound/pull.js";
 
 export interface LifecycleDeps {
   store: StateStore;
@@ -8,6 +9,7 @@ export interface LifecycleDeps {
   projectId: number;
   issueTypeId?: number;
   priorityId?: number;
+  rest?: PullRest; // インバウンド pull 用（未指定なら pull をスキップ）
 }
 
 export interface HookOutput { additionalContext?: string; }
@@ -34,5 +36,14 @@ export async function runSessionStart(ev: CanonicalEvent, deps: LifecycleDeps): 
   }
 
   const fresh = await store.loadOrCreate(ev.sessionId);
-  return { additionalContext: `Backlog 課題: ${fresh.issueKey}（この作業は同課題へ同期されます）` };
+  let context = `Backlog 課題: ${fresh.issueKey}（この作業は同課題へ同期されます）`;
+  if (deps.rest) {
+    try {
+      const digest = await runPull({ rest: deps.rest, store, sessionId: ev.sessionId, projectId: deps.projectId || undefined });
+      context += `\n${formatDigest(digest)}`;
+    } catch {
+      // pull 失敗でセッション開始を止めない（非ブロッキング原則）
+    }
+  }
+  return { additionalContext: context };
 }

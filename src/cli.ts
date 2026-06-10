@@ -1,11 +1,12 @@
-import { normalizeClaude, readStdin } from "./events/normalize.js";
+import { normalizeAuto, readStdin } from "./events/normalize.js";
 import { runSessionStart } from "./lifecycle/session-start.js";
 import { runPostTool } from "./lifecycle/post-tool.js";
+import { runSubagentStop } from "./lifecycle/subagent-stop.js";
 import { runStop } from "./lifecycle/stop.js";
 import { runSessionEnd } from "./lifecycle/session-end.js";
 import type { LifecycleEvent } from "./types.js";
 
-export interface ParsedArgs { cmd: string; event?: LifecycleEvent; dryRun?: boolean; planPath?: string; }
+export interface ParsedArgs { cmd: string; event?: LifecycleEvent; dryRun?: boolean; planPath?: string; sessionId?: string; }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd, ...rest] = argv;
@@ -16,6 +17,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const out: ParsedArgs = { cmd, dryRun: rest.includes("--dry-run") };
     const i = rest.indexOf("--plan");
     if (i >= 0 && rest[i + 1]) out.planPath = rest[i + 1];
+    return out;
+  }
+  if (cmd === "pull" || cmd === "flush") {
+    const out: ParsedArgs = { cmd };
+    const i = rest.indexOf("--session");
+    if (i >= 0 && rest[i + 1]) out.sessionId = rest[i + 1];
     return out;
   }
   return { cmd };
@@ -30,17 +37,18 @@ function emit(out: { additionalContext?: string }): void {
 export async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
   if (parsed.cmd === "help") {
-    process.stdout.write("backlog-sync <init|seed [--plan <file>] [--dry-run]|hook <event>|pull|status|flush>\n");
+    process.stdout.write("backlog-sync <init|seed [--plan <file>] [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
     const raw = await readStdin();
-    const ev = normalizeClaude(parsed.event, raw);
-    if (!ev.sessionId) return; // 識別子が無ければ無視（非ブロッキング）
+    const ev = normalizeAuto(parsed.event, raw);
+    if (!ev || !ev.sessionId) return; // 識別子が無ければ無視（非ブロッキング）
     const { buildRuntime } = await import("./runtime.js");
     const { deps } = await buildRuntime(ev.cwd);
     if (parsed.event === "session-start") emit(await runSessionStart(ev, deps));
     else if (parsed.event === "post-tool") await runPostTool(ev, deps);
+    else if (parsed.event === "subagent-stop") await runSubagentStop(ev, deps);
     else if (parsed.event === "stop") await runStop(ev, deps);
     else if (parsed.event === "session-end") await runSessionEnd(ev, deps);
     return;
@@ -76,6 +84,48 @@ export async function main(argv: string[]): Promise<void> {
     process.stdout.write(JSON.stringify(res, null, 2) + "\n");
     return;
   }
-  // pull / status / flush は後続フェーズ（pull=P4、status/flush=ユーティリティ）で配線。
-  process.stdout.write(`backlog-sync: '${parsed.cmd}' は後続フェーズで配線\n`);
+  if (parsed.cmd === "pull") {
+    const cwd = process.cwd();
+    const { buildRuntime } = await import("./runtime.js");
+    const { deps, rest } = await buildRuntime(cwd);
+    const { runPull, formatDigest } = await import("./inbound/pull.js");
+    const digest = await runPull({ rest, store: deps.store, sessionId: parsed.sessionId, projectId: deps.projectId || undefined });
+    process.stdout.write(formatDigest(digest) + "\n");
+    process.stdout.write(JSON.stringify(digest, null, 2) + "\n");
+    return;
+  }
+  if (parsed.cmd === "status") {
+    const cwd = process.cwd();
+    const { StateStore } = await import("./state/store.js");
+    const { stateDirFor } = await import("./config.js");
+    const store = new StateStore(stateDirFor(cwd));
+    const sessions = await store.listSessions();
+    if (!sessions.length) { process.stdout.write("同期セッションなし\n"); return; }
+    for (const s of sessions) {
+      process.stdout.write(`session=${s.sessionId} issue=${s.issueKey ?? "-"} status=${s.lastStatus ?? "-"} queue=${s.pendingQueue?.length ?? 0} buffer=${s.activityBuffer?.length ?? 0}\n`);
+    }
+    return;
+  }
+  if (parsed.cmd === "flush") {
+    const cwd = process.cwd();
+    const { buildRuntime } = await import("./runtime.js");
+    const { deps } = await buildRuntime(cwd);
+    const sessions = await deps.store.listSessions();
+    const targets = parsed.sessionId ? sessions.filter((s) => s.sessionId === parsed.sessionId) : sessions;
+    if (!targets.length) { process.stdout.write("同期セッションなし\n"); return; }
+    for (const s of targets) {
+      const before = s.pendingQueue?.length ?? 0;
+      if (before === 0) { process.stdout.write(`${s.sessionId}: キュー 0 件\n`); continue; }
+      await deps.store.drain(s.sessionId, async (op) => {
+        if (!s.issueKey) return false; // 課題未紐付の op は残置
+        if (op.op === "add_comment") { await deps.adapter.addComment(s.issueKey, String(op.payload.content)); return true; }
+        if (op.op === "update_issue") { await deps.adapter.setStatus(s.issueKey, Number(op.payload.statusId), undefined); return true; }
+        return true;
+      });
+      const after = (await deps.store.loadOrCreate(s.sessionId)).pendingQueue.length;
+      process.stdout.write(`${s.sessionId}: 排出 ${before - after}/${before} 件（残 ${after}）\n`);
+    }
+    return;
+  }
+  process.stdout.write(`backlog-sync: 不明なコマンド '${parsed.cmd}'\n`);
 }

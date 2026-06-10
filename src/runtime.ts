@@ -19,6 +19,6 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
   } catch {
     // project.json 未作成: env または 0 にフォールバック
   }
-  const deps: LifecycleDeps = { store, adapter, projectId };
+  const deps: LifecycleDeps = { store, adapter, projectId, rest };
   return { deps, rest, projectKey: cfg.projectKey };
 }

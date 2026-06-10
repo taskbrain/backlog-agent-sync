@@ -6,6 +6,9 @@
     "PostToolUse": [
       { "matcher": "", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/backlog-sync hook post-tool", "async": true } ] }
     ],
+    "SubagentStop": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/backlog-sync hook subagent-stop", "async": true } ] }
+    ],
     "Stop": [
       { "matcher": "", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/backlog-sync hook stop", "async": true } ] }
     ],
