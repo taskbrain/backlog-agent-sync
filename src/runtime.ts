@@ -10,15 +10,19 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
   const rest = new BacklogRest(cfg);
   const adapter = new BacklogAdapter(rest, cfg.projectKey);
   const store = new StateStore(stateDirFor(cwd));
-  // projectId は init が書く project.json を優先し、無ければ env、無ければ 0。
+  // projectId/issueTypeId/priorityId は init が書く project.json を優先し、無ければ env、無ければ未解決。
   let projectId = Number(process.env.BACKLOG_PROJECT_ID ?? 0);
+  let issueTypeId: number | undefined = Number(process.env.BACKLOG_ISSUE_TYPE_ID ?? 0) || undefined;
+  let priorityId: number | undefined = Number(process.env.BACKLOG_PRIORITY_ID ?? 0) || undefined;
   try {
     const raw = await readFile(projectConfigPath(cwd), "utf8");
-    const pj = JSON.parse(raw) as { projectId?: number };
+    const pj = JSON.parse(raw) as { projectId?: number; defaultIssueTypeId?: number; defaultPriorityId?: number };
     if (pj.projectId) projectId = pj.projectId;
+    if (pj.defaultIssueTypeId) issueTypeId = pj.defaultIssueTypeId; // 旧 project.json（フィールド無し）は env/未解決のまま
+    if (pj.defaultPriorityId) priorityId = pj.defaultPriorityId;
   } catch {
-    // project.json 未作成: env または 0 にフォールバック
+    // project.json 未作成: env または未解決にフォールバック
   }
-  const deps: LifecycleDeps = { store, adapter, projectId, rest };
+  const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest };
   return { deps, rest, projectKey: cfg.projectKey };
 }

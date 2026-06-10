@@ -89,6 +89,22 @@ describe("runPull", () => {
     expect(digest.issues.length).toBe(1);
     expect(digest.comments.length).toBe(1);
   });
+
+  it("content が空のコメント(状態遷移changelog)は digest から除外しつつカーソルは前進する", async () => {
+    const store = new StateStore(dir);
+    const rest = fakeRest({
+      getComments: vi.fn().mockResolvedValue([
+        { id: 20, content: "実コメント", createdUser: { id: 9, name: "alice" }, created: "" },
+        { id: 21, content: "", createdUser: { id: 9, name: "坂根一馬" }, created: "" }, // 状態遷移のみ
+        { id: 22, content: null, createdUser: { id: 9, name: "坂根一馬" }, created: "" }, // content null
+        { id: 23, content: "  \n", createdUser: { id: 9, name: "坂根一馬" }, created: "" }, // 空白のみ
+      ]),
+    });
+    const digest = await runPull({ rest, store, sessionId: "s1" });
+    expect(digest.comments).toEqual([{ issueKey: "PROJ-1", id: 20, content: "実コメント", createdUser: "alice" }]);
+    const st = await store.loadOrCreate("s1");
+    expect(st.inboundCursor?.commentMaxId).toEqual({ "PROJ-1": 23 }); // 空コメントの id まで前進=次回再取得しない
+  });
 });
 
 describe("formatDigest", () => {

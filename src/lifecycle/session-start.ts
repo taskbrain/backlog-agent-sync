@@ -21,12 +21,20 @@ export async function runSessionStart(ev: CanonicalEvent, deps: LifecycleDeps): 
 
   // 既に課題が紐付いていれば再作成しない（resume / 二重起動の冪等）
   if (!st.issueKey) {
+    // issueTypeId/priorityId 未解決（init 未実行）なら実在しない ID で 404 を投げ続けず、ローカル記録のみで継続
+    if (!deps.issueTypeId || !deps.priorityId) {
+      process.stderr.write("backlog-sync: init未実行（issueTypeId/priorityId 未解決）。課題作成をスキップします。`backlog-sync init` を実行してください。\n");
+      await store.withLock(ev.sessionId, (s) => {
+        s.activityBuffer.push({ ts: new Date().toISOString(), tool: "session-start", summary: "init未実行のため課題未作成" });
+      });
+      return { additionalContext: "Backlog 同期: init 未実行のため課題は未作成です（活動はローカル記録のみ）。`backlog-sync init` を実行してください。" };
+    }
     const summary = `[セッション] ${ev.sessionId.slice(0, 8)} (${new Date().toISOString().slice(0, 16)})`;
     const ref = await adapter.createIssue({
       projectId,
       summary,
-      issueTypeId: deps.issueTypeId ?? 1,
-      priorityId: deps.priorityId ?? 3,
+      issueTypeId: deps.issueTypeId,
+      priorityId: deps.priorityId,
       description: `自動生成: backlog-agent-sync\nsession_id: ${ev.sessionId}`,
     });
     await store.withLock(ev.sessionId, (s) => {

@@ -6,6 +6,8 @@ export interface IssueRef { id: number; issueKey: string; }
 export interface FoundIssue extends IssueRef { summary?: string; status?: string; updated?: string; }
 export interface IssueComment { id: number; content: string; createdUser: { id: number; name: string }; created: string; }
 export interface StatusDef { id: number; name: string; }
+export interface IssueTypeDef { id: number; name: string; }
+export interface PriorityDef { id: number; name: string; }
 export interface ProjectRef { id: number; projectKey: string; name: string; }
 export interface CreateIssueInput {
   projectId: number; summary: string; issueTypeId: number; priorityId: number;
@@ -73,6 +75,14 @@ export class BacklogRest {
 
   async getProjectStatuses(projectKey: string): Promise<StatusDef[]> {
     return this.request("GET", `/projects/${encodeURIComponent(projectKey)}/statuses`, "read");
+  }
+
+  async getIssueTypes(projectIdOrKey: string | number): Promise<IssueTypeDef[]> {
+    return this.request("GET", `/projects/${encodeURIComponent(String(projectIdOrKey))}/issueTypes`, "read");
+  }
+
+  async getPriorities(): Promise<PriorityDef[]> {
+    return this.request("GET", "/priorities", "read");
   }
 
   async createIssue(input: CreateIssueInput): Promise<IssueRef> {

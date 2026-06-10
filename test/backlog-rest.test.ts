@@ -84,4 +84,17 @@ describe("BacklogRest", () => {
     expect(url).toContain("count=100");
     expect(comments[0].id).toBe(11);
   });
+
+  it("getIssueTypes / getPriorities は対応エンドポイントを呼び id/name を返す", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonRes([{ id: 4236190, name: "タスク" }, { id: 4236189, name: "バグ" }]))
+      .mockResolvedValueOnce(jsonRes([{ id: 2, name: "高" }, { id: 3, name: "中" }, { id: 4, name: "低" }]));
+    const rest = new BacklogRest(cfg, { fetch: fetchMock, rateLimiter: { beforeRequest: async () => {}, handle429: async () => {} } as any });
+    const types = await rest.getIssueTypes("PROJ");
+    const priorities = await rest.getPriorities();
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v2/projects/PROJ/issueTypes");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/api/v2/priorities");
+    expect(types[0]).toEqual({ id: 4236190, name: "タスク" });
+    expect(priorities[1].name).toBe("中");
+  });
 });

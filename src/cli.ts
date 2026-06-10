@@ -59,7 +59,7 @@ export async function main(argv: string[]): Promise<void> {
     const { deps, rest, projectKey } = await buildRuntime(cwd);
     const { runInit } = await import("./init.js");
     const res = await runInit({ cwd, projectKey, projectId: deps.projectId || undefined }, { adapter: deps.adapter, rest });
-    process.stdout.write(`init OK: project=${projectKey} projectId=${res.projectId} user=${res.me.name}\n`);
+    process.stdout.write(`init OK: project=${projectKey} projectId=${res.projectId} user=${res.me.name} issueTypeId=${res.defaultIssueTypeId ?? "-"} priorityId=${res.defaultPriorityId ?? "-"}\n`);
     return;
   }
   if (parsed.cmd === "seed") {
@@ -80,7 +80,7 @@ export async function main(argv: string[]): Promise<void> {
       priorityId: planRaw.priorityId,
       epics: planRaw.epics ?? [],
     };
-    const res = await applySeed(plan as any, { adapter: deps.adapter, dryRun: parsed.dryRun });
+    const res = await applySeed(plan as any, { adapter: deps.adapter, dryRun: parsed.dryRun, defaultIssueTypeId: deps.issueTypeId, defaultPriorityId: deps.priorityId });
     process.stdout.write(JSON.stringify(res, null, 2) + "\n");
     return;
   }

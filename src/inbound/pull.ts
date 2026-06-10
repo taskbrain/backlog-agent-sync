@@ -52,8 +52,11 @@ export async function runPull(deps: PullDeps): Promise<InboundDigest> {
     }
     for (const c of fetched) {
       if (minId !== undefined && c.id <= minId) continue; // minId が inclusive な場合の重複排除
-      comments.push({ issueKey: it.issueKey, id: c.id, content: (c.content ?? "").slice(0, CONTENT_MAX), createdUser: c.createdUser?.name ?? "" });
+      // カーソルは空コメントの id でも前進させる（次回 pull で再取得しない）
       if (!commentMaxId[it.issueKey] || c.id > commentMaxId[it.issueKey]) commentMaxId[it.issueKey] = c.id;
+      const content = (c.content ?? "").trim();
+      if (!content) continue; // 状態遷移のみの changelog エントリ（content 空）は digest に含めない
+      comments.push({ issueKey: it.issueKey, id: c.id, content: content.slice(0, CONTENT_MAX), createdUser: c.createdUser?.name ?? "" });
     }
   }
 
