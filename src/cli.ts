@@ -46,7 +46,9 @@ export async function main(argv: string[]): Promise<void> {
     const ev = normalizeAuto(parsed.event, raw);
     if (!ev || !ev.sessionId) return; // 識別子が無ければ無視（非ブロッキング）
     const { buildRuntime } = await import("./runtime.js");
-    const { deps } = await buildRuntime(ev.cwd);
+    // state の置き場はセッションの一時 cwd でなくプロジェクトルートに固定する
+    const root = process.env.BACKLOG_SYNC_ROOT || process.env.CLAUDE_PROJECT_DIR || ev.cwd;
+    const { deps } = await buildRuntime(root);
     if (parsed.event === "session-start") emit(await runSessionStart(ev, deps));
     else if (parsed.event === "post-tool") await runPostTool(ev, deps);
     else if (parsed.event === "subagent-stop") await runSubagentStop(ev, deps);
