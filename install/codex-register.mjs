@@ -10,7 +10,7 @@
  *
  * 本スクリプトの処理:
  *   a. config.toml から旧方式（マーカー付き [[hooks.*]] ブロック）を削除
- *   b. hooks.json へ 4 イベントのフックをマージ（他ツールの既存フックは完全保全・冪等）
+ *   b. hooks.json へ 5 イベントのフックをマージ（他ツールの既存フックは完全保全・冪等）
  *   c. config.toml の [hooks.state."..."] へ trusted_hash を登録/更新（重複セクションなし）
  *
  * 使い方: node codex-register.mjs <bin-path> <hooks-json-path> <config-toml-path>
@@ -27,6 +27,7 @@ if (!binPath || !hooksJsonPath || !configPath) {
 
 const EVENTS = [
   { name: "SessionStart", label: "session_start", cli: "session-start", timeout: 30, statusMessage: "Backlog: session sync" },
+  { name: "UserPromptSubmit", label: "user_prompt_submit", cli: "user-prompt-submit", timeout: 30 },
   { name: "PostToolUse", label: "post_tool_use", cli: "post-tool", timeout: 30 },
   { name: "SubagentStop", label: "subagent_stop", cli: "subagent-stop", timeout: 30 },
   { name: "Stop", label: "stop", cli: "stop", timeout: 60, statusMessage: "Backlog: session summary" },

@@ -108,7 +108,7 @@ BACKLOG_PROJECT=PROJ
 
 スクリプトが行うこと（**冪等**・実行前にタイムスタンプ付きバックアップを自動作成）:
 
-- `~/.codex/hooks.json` へ 4 イベント（SessionStart / PostToolUse / SubagentStop / Stop）のフック定義をマージ（他ツールの既存フックは完全保全。`backlog-sync` のエントリが既にあれば追加しません）
+- `~/.codex/hooks.json` へ 5 イベント（SessionStart / UserPromptSubmit / PostToolUse / SubagentStop / Stop）のフック定義をマージ（他ツールの既存フックは完全保全。`backlog-sync` のエントリが既にあれば追加しません）
 - `~/.codex/config.toml` の `[hooks.state."<hooks.json絶対パス>:<event_label>:<groupIndex>:<handlerIndex>"]` へ `trusted_hash` を**自動登録/更新** — 手動の承認なしでフックが自動実行されます。フックの command / timeout / statusMessage を変更した場合は、スクリプトを再実行するとハッシュが更新されます
 - `~/.codex/config.toml` へ `[mcp_servers.backlog]` をマージ（既に `backlog` エントリがあればスキップ）
 - `~/.codex/AGENTS.md` へ意味的ポリシー snippet を追記（マーカーコメントで冪等）

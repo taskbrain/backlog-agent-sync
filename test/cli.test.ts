@@ -17,6 +17,9 @@ describe("parseArgs", () => {
   it("hook subagent-stop を解釈する", () => {
     expect(parseArgs(["hook", "subagent-stop"])).toEqual({ cmd: "hook", event: "subagent-stop" });
   });
+  it("hook user-prompt-submit を解釈する", () => {
+    expect(parseArgs(["hook", "user-prompt-submit"])).toEqual({ cmd: "hook", event: "user-prompt-submit" });
+  });
   it("pull を解釈する（--session は任意）", () => {
     expect(parseArgs(["pull"])).toEqual({ cmd: "pull" });
     expect(parseArgs(["pull", "--session", "s1"])).toEqual({ cmd: "pull", sessionId: "s1" });

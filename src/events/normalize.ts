@@ -2,6 +2,20 @@ import type { AgentTool, CanonicalEvent, LifecycleEvent } from "../types.js";
 
 type Raw = Record<string, any>;
 
+/** tool_input から要旨に必要なフィールドだけ抽出する（全文は CanonicalEvent に持ち込まない）。 */
+function pickToolInput(raw: Raw): { filePath?: string; command?: string } | undefined {
+  const ti = raw.tool_input;
+  if (!ti || typeof ti !== "object") return undefined;
+  const filePath = typeof ti.file_path === "string" ? ti.file_path : undefined;
+  const command = typeof ti.command === "string" ? ti.command : undefined;
+  if (!filePath && !command) return undefined;
+  return { ...(filePath ? { filePath } : {}), ...(command ? { command } : {}) };
+}
+
+function pickString(v: unknown): string | undefined {
+  return typeof v === "string" && v !== "" ? v : undefined;
+}
+
 export function normalizeClaude(event: LifecycleEvent, raw: Raw): CanonicalEvent {
   return {
     tool: "claude",
@@ -9,10 +23,14 @@ export function normalizeClaude(event: LifecycleEvent, raw: Raw): CanonicalEvent
     sessionId: String(raw.session_id ?? ""),
     cwd: String(raw.cwd ?? process.cwd()),
     source: raw.source,
+    prompt: pickString(raw.prompt),
     toolName: raw.tool_name,
     toolUseId: raw.tool_use_id,
+    toolInput: pickToolInput(raw),
     agentType: raw.agent_type,
     stopHookActive: raw.stop_hook_active,
+    lastAssistantMessage: pickString(raw.last_assistant_message),
+    transcriptPath: pickString(raw.transcript_path),
     reason: raw.reason,
     raw,
   };
@@ -20,12 +38,13 @@ export function normalizeClaude(event: LifecycleEvent, raw: Raw): CanonicalEvent
 
 /**
  * hook_event_name → ライフサイクルの対応（Claude / Codex 互換イベント名）。
- * 確実に対応付くもののみ列挙し、それ以外（PreToolUse/PreCompact/UserPromptSubmit 等）は
+ * 確実に対応付くもののみ列挙し、それ以外（PreToolUse/PreCompact 等）は
  * 保守的に null でスキップする（設計 §12）。
  * 注: Codex に SessionEnd フックは無い（キュー排出は Stop の drain と `flush` で代替）。
  */
 const HOOK_EVENT_TO_LIFECYCLE: Record<string, LifecycleEvent> = {
   SessionStart: "session-start",
+  UserPromptSubmit: "user-prompt-submit",
   PostToolUse: "post-tool",
   SubagentStop: "subagent-stop",
   Stop: "stop",
@@ -51,10 +70,14 @@ export function normalizeCodex(event: LifecycleEvent | undefined, raw: Raw): Can
     sessionId: String(raw.session_id ?? ""),
     cwd: String(raw.cwd ?? process.cwd()),
     source: raw.source,
+    prompt: pickString(raw.prompt),
     toolName: raw.tool_name,
     toolUseId,
+    toolInput: pickToolInput(raw),
     agentType: raw.agent_type,
     stopHookActive: raw.stop_hook_active,
+    lastAssistantMessage: pickString(raw.last_assistant_message),
+    transcriptPath: pickString(raw.transcript_path),
     reason: raw.reason,
     raw,
   };

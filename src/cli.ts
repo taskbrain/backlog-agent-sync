@@ -1,5 +1,6 @@
 import { normalizeAuto, readStdin } from "./events/normalize.js";
 import { runSessionStart } from "./lifecycle/session-start.js";
+import { runUserPromptSubmit } from "./lifecycle/user-prompt-submit.js";
 import { runPostTool } from "./lifecycle/post-tool.js";
 import { runSubagentStop } from "./lifecycle/subagent-stop.js";
 import { runStop } from "./lifecycle/stop.js";
@@ -50,6 +51,7 @@ export async function main(argv: string[]): Promise<void> {
     const root = process.env.BACKLOG_SYNC_ROOT || process.env.CLAUDE_PROJECT_DIR || ev.cwd;
     const { deps } = await buildRuntime(root);
     if (parsed.event === "session-start") emit(await runSessionStart(ev, deps));
+    else if (parsed.event === "user-prompt-submit") await runUserPromptSubmit(ev, deps);
     else if (parsed.event === "post-tool") await runPostTool(ev, deps);
     else if (parsed.event === "subagent-stop") await runSubagentStop(ev, deps);
     else if (parsed.event === "stop") await runStop(ev, deps);

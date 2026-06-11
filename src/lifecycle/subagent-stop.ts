@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CanonicalEvent } from "../types.js";
 import { ensureSessionIssue, type LifecycleDeps, type HookOutput } from "./session-start.js";
+import { summarizeFiles, summarizeCommands, countTools } from "./stop.js";
 
 export async function runSubagentStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<HookOutput> {
   if (ev.stopHookActive) return {}; // 既にこのフックでブロック中: 何もしない
@@ -28,9 +29,15 @@ export async function runSubagentStop(ev: CanonicalEvent, deps: LifecycleDeps): 
   if (!ensured) return {};
   const issueKey = ensured; // const 化（drain クロージャ内での narrowing 維持）
 
+  // ターン要約と同テンプレの簡略版（agent_type + バッファ要旨）
   const label = ev.agentType ?? "subagent";
-  const lines = entries.map((e) => `- ${e.ts.slice(11, 16)} ${e.tool}`).join("\n");
-  const body = `🤖 サブエージェント要約（backlog-agent-sync / ${label}）\n使用ツール ${entries.length} 件\n${lines}`;
+  const files = summarizeFiles(entries);
+  const commands = summarizeCommands(entries);
+  const lines: string[] = [`🤖 サブエージェント要約（${label}）`];
+  if (files) lines.push(`■ 変更ファイル: ${files}`);
+  if (commands) lines.push(`■ 実行コマンド: ${commands}`);
+  lines.push(`（ツール使用 ${countTools(entries)} 件）`);
+  const body = lines.join("\n");
 
   // 送信前に耐久記録（オフラインでも欠落しない）
   await store.enqueue(ev.sessionId, { id: `subagent-stop:${material}`, op: "add_comment", payload: { content: body }, attempts: 0 });

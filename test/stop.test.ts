@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../src/state/store.js";
@@ -115,5 +115,63 @@ describe("runStop", () => {
     await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: adapter as any, projectId: 10 });
     expect(adapter.createIssue).not.toHaveBeenCalled();
     expect(adapter.addComment).not.toHaveBeenCalled();
+  });
+
+  it("ターン要約に依頼・結果・変更ファイル集計・実行コマンドが入る", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "バグを直してテストも追加して"; });
+    const base = { tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", raw: {} } as const;
+    await runPostTool({ ...base, toolName: "Edit", toolUseId: "a", toolInput: { filePath: "/r/src/foo.ts" } }, { store, adapter: {} as any, projectId: 10 });
+    await runPostTool({ ...base, toolName: "Edit", toolUseId: "b", toolInput: { filePath: "/r/src/foo.ts" } }, { store, adapter: {} as any, projectId: 10 });
+    await runPostTool({ ...base, toolName: "Bash", toolUseId: "c", toolInput: { command: "npm test\n--watch" } }, { store, adapter: {} as any, projectId: 10 });
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "codex", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: "直しました。テストも追加済みです。", raw: {} },
+      { store, adapter: adapter as any, projectId: 10 },
+    );
+    const body = String(adapter.addComment.mock.calls[0][1]);
+    expect(body).toContain("ターン要約 #1");
+    expect(body).toContain("■ 依頼: バグを直してテストも追加して");
+    expect(body).toContain("■ 結果: 直しました。テストも追加済みです。");
+    expect(body).toContain("■ 変更ファイル: src/foo.ts(2)");
+    expect(body).toContain("■ 実行コマンド: npm test --watch（1件）");
+    expect(body).toContain("（ツール使用 3 件）");
+    const st = await store.loadOrCreate("s1");
+    expect(st.turnCount).toBe(1);
+    expect(st.lastPrompt).toBeUndefined(); // 消費後クリア
+  });
+
+  it("lastAssistantMessage が無ければ transcript 末尾から結果を抽出する（Claude）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; });
+    const transcriptPath = join(dir, "transcript.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: "依頼" } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "transcriptの最終回答" }] } }),
+    ].join("\n") + "\n", "utf8");
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, transcriptPath, raw: {} },
+      { store, adapter: adapter as any, projectId: 10 },
+    );
+    expect(String(adapter.addComment.mock.calls[0][1])).toContain("■ 結果: transcriptの最終回答");
+  });
+
+  it("2ターン連続で2コメント投稿され、2回目の resolved 遷移は同値スキップされる", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "依頼1"; });
+    const adapter = adapterWithIssue();
+    const ev = { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} } as const;
+    await runStop(ev, { store, adapter: adapter as any, projectId: 10 });
+    await store.withLock("s1", (s) => { s.lastPrompt = "依頼2"; }); // 次ターンの依頼（状態フリップ無しのまま stop）
+    await runStop(ev, { store, adapter: adapter as any, projectId: 10 });
+
+    expect(adapter.addComment).toHaveBeenCalledTimes(2); // セッション固定 id で潰れない
+    expect(String(adapter.addComment.mock.calls[0][1])).toContain("ターン要約 #1");
+    expect(String(adapter.addComment.mock.calls[1][1])).toContain("ターン要約 #2");
+    expect(String(adapter.addComment.mock.calls[1][1])).toContain("依頼2");
+    expect(adapter.setStatus).toHaveBeenCalledTimes(1); // 2回目は resolved 同値スキップ（code 7 回避）
+    const st = await store.loadOrCreate("s1");
+    expect(st.turnCount).toBe(2);
   });
 });

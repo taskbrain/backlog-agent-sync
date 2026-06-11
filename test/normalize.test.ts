@@ -16,6 +16,34 @@ describe("normalizeClaude", () => {
     expect(ev.toolName).toBe("Edit");
     expect(ev.toolUseId).toBe("tu-1");
   });
+
+  it("UserPromptSubmit は prompt / transcript_path を拾う", () => {
+    const ev = normalizeClaude("user-prompt-submit", {
+      session_id: "s1", cwd: "/repo", hook_event_name: "UserPromptSubmit",
+      prompt: "バグを直して", transcript_path: "/tmp/t.jsonl",
+    });
+    expect(ev.prompt).toBe("バグを直して");
+    expect(ev.transcriptPath).toBe("/tmp/t.jsonl");
+  });
+
+  it("tool_input は file_path/command のみ抽出する（全文は持ち込まない）", () => {
+    const ev = normalizeClaude("post-tool", {
+      session_id: "s1", cwd: "/repo", tool_name: "Edit", tool_use_id: "tu-1",
+      tool_input: { file_path: "/repo/a.ts", old_string: "巨大な本文...", new_string: "..." },
+    });
+    expect(ev.toolInput).toEqual({ filePath: "/repo/a.ts" });
+    const bash = normalizeClaude("post-tool", {
+      session_id: "s1", cwd: "/repo", tool_name: "Bash", tool_input: { command: "npm test" },
+    });
+    expect(bash.toolInput).toEqual({ command: "npm test" });
+  });
+
+  it("Stop は transcript_path（Claude）を拾う", () => {
+    const ev = normalizeClaude("stop", {
+      session_id: "s1", cwd: "/repo", hook_event_name: "Stop", stop_hook_active: false, transcript_path: "/tmp/t.jsonl",
+    });
+    expect(ev.transcriptPath).toBe("/tmp/t.jsonl");
+  });
 });
 
 describe("normalizeCodex", () => {
@@ -55,6 +83,20 @@ describe("normalizeCodex", () => {
       session_id: "s1", cwd: "/repo", hook_event_name: "PreCompact", turn_id: "t-2", trigger: "auto",
     });
     expect(ev).toBeNull();
+  });
+
+  it("Stop は last_assistant_message を、UserPromptSubmit は prompt を拾う", () => {
+    const stop = normalizeCodex("stop", {
+      session_id: "s1", cwd: "/repo", hook_event_name: "Stop", turn_id: "t-1",
+      last_assistant_message: "完了しました", model: "gpt-5.1-codex",
+    });
+    expect(stop?.lastAssistantMessage).toBe("完了しました");
+    const ups = normalizeCodex(undefined, {
+      session_id: "s1", cwd: "/repo", hook_event_name: "UserPromptSubmit", turn_id: "t-2",
+      prompt: "次の依頼", model: "gpt-5.1-codex",
+    });
+    expect(ups?.event).toBe("user-prompt-submit");
+    expect(ups?.prompt).toBe("次の依頼");
   });
 });
 

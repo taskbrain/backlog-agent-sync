@@ -10,7 +10,7 @@
 #   2. config.toml の
 #        [hooks.state."<hooks.jsonの絶対パス>:<event_label>:<groupIndex>:<handlerIndex>"]
 #      に trusted_hash = "sha256:..." を登録する（event_label は snake_case:
-#      session_start / post_tool_use / subagent_stop / stop）
+#      session_start / user_prompt_submit / post_tool_use / subagent_stop / stop）
 # このマージとハッシュ計算は install/install-codex.sh（内部で
 # install/codex-register.mjs を呼ぶ）が自動で行う。手動での承認は不要。
 #
