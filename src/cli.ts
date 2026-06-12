@@ -8,11 +8,21 @@ import { runSessionEnd } from "./lifecycle/session-end.js";
 import type { LifecycleEvent } from "./types.js";
 import type { SeedLedger } from "./seed/apply.js";
 
-export interface ParsedArgs { cmd: string; event?: LifecycleEvent; dryRun?: boolean; planPath?: string; sessionId?: string; vcs?: "github" | "backlog" | "generic"; }
+export interface ParsedArgs {
+  cmd: string;
+  event?: LifecycleEvent;
+  dryRun?: boolean;
+  planPath?: string;
+  sessionId?: string;
+  vcs?: "github" | "backlog" | "generic";
+  prune?: boolean;
+  recreate?: boolean;
+  target?: "wiki" | "documents";
+}
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd, ...rest] = argv;
-  const known = ["hook", "init", "seed", "pull", "status", "flush"];
+  const known = ["hook", "init", "seed", "pull", "status", "flush", "docs"];
   if (!cmd || !known.includes(cmd)) return { cmd: "help" };
   if (cmd === "hook") return { cmd, event: rest[0] as LifecycleEvent };
   if (cmd === "init") {
@@ -26,6 +36,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const out: ParsedArgs = { cmd, dryRun: rest.includes("--dry-run") };
     const i = rest.indexOf("--plan");
     if (i >= 0 && rest[i + 1]) out.planPath = rest[i + 1];
+    return out;
+  }
+  if (cmd === "docs") {
+    const out: ParsedArgs = { cmd, dryRun: rest.includes("--dry-run"), prune: rest.includes("--prune"), recreate: rest.includes("--recreate") };
+    const i = rest.indexOf("--target");
+    const t = i >= 0 ? rest[i + 1] : undefined;
+    if (t === "wiki" || t === "documents") out.target = t;
     return out;
   }
   if (cmd === "pull" || cmd === "flush") {
@@ -46,7 +63,7 @@ function emit(out: { additionalContext?: string }): void {
 export async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
   if (parsed.cmd === "help") {
-    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic]|seed [--plan <file>] [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
@@ -111,6 +128,39 @@ export async function main(argv: string[]): Promise<void> {
       ...(parsed.dryRun ? {} : { saveLedger: (l: SeedLedger) => saveSeedLedger(ledgerPath, l) }),
     });
     process.stdout.write(JSON.stringify(res, null, 2) + "\n");
+    return;
+  }
+  if (parsed.cmd === "docs") {
+    const cwd = process.cwd();
+    const { buildRuntime } = await import("./runtime.js");
+    const { deps, rest } = await buildRuntime(cwd);
+    const { readFile } = await import("node:fs/promises");
+    const { projectConfigPath, docsLedgerPath } = await import("./config.js");
+    let cfg: import("./types.js").DocsSyncConfig = {};
+    try {
+      cfg = (JSON.parse(await readFile(projectConfigPath(cwd), "utf8")) as import("./types.js").ProjectCache).docsSync ?? {};
+    } catch {
+      // project.json 未作成/設定なし → 既定値（root=docs, target=wiki）で実行
+    }
+    const { runDocsSync } = await import("./docs/sync.js");
+    const { loadDocsLedger, saveDocsLedger } = await import("./docs/ledger.js");
+    const ledgerPath = docsLedgerPath(cwd);
+    const res = await runDocsSync(
+      { repoRoot: cwd, cfg, dryRun: parsed.dryRun, prune: parsed.prune, recreate: parsed.recreate, target: parsed.target },
+      {
+        rest,
+        projectId: deps.projectId,
+        textFormattingRule: deps.textFormattingRule,
+        vcs: deps.vcs,
+        git: deps.git,
+        loadLedger: () => loadDocsLedger(ledgerPath),
+        // dry-run は台帳も書かない（書込なし保証）
+        ...(parsed.dryRun ? {} : { saveLedger: (l: import("./docs/ledger.js").DocsLedger) => saveDocsLedger(ledgerPath, l) }),
+      },
+    );
+    for (const p of res.preview) process.stdout.write(`${p.action.padEnd(6)} ${p.pageName}\n`);
+    for (const w of res.warnings) process.stdout.write(`WARN: ${w}\n`);
+    process.stdout.write(`docs sync: created=${res.created} updated=${res.updated} skipped=${res.skipped} pruned=${res.pruned}${parsed.dryRun ? " (dry-run)" : ""}\n`);
     return;
   }
   if (parsed.cmd === "pull") {

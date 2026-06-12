@@ -99,6 +99,16 @@ export interface FieldRules {
   summarize?: "off" | "claude"; // 依頼文の LLM 整理（既定 "claude" = サブスク認証の claude CLI で haiku 1呼出/ターン。"off" で無効）
 }
 
+/** project.json `docsSync`（docs → Backlog Wiki/Document 同期の設定。G21）。 */
+export interface DocsSyncConfig {
+  target?: "wiki" | "documents"; // 既定 "wiki"（更新可能）。documents はワンショット投入（更新 API 不在）
+  root?: string; // 同期ルート（リポジトリルート相対。既定 "docs"）
+  overviewSource?: string; // 概要ページの元（リポジトリルート相対。既定 "README.md"）
+  overviewPage?: string; // 概要の Wiki ページ名（既定 "プロジェクト概要"。Home は不可侵のため指定不可）
+  exclude?: string[]; // root 相対の前方一致で除外
+  maxFileKb?: number; // 超過は警告スキップ（既定 100）
+}
+
 /** project.json 全体（init が書くキャッシュ）。すべて optional = 旧ファイル後方互換。 */
 export interface ProjectCache {
   projectKey?: string;
@@ -116,6 +126,7 @@ export interface ProjectCache {
   textFormattingRule?: TextFormattingRule;
   vcs?: VcsConfig;
   fieldRules?: FieldRules;
+  docsSync?: DocsSyncConfig;
   resolvedAt?: string;
 }
 

@@ -24,3 +24,7 @@ export function projectConfigPath(cwd: string): string {
 export function seedLedgerPath(cwd: string): string {
   return join(cwd, ".claude", "backlog-agent-sync", "seed-ledger.json");
 }
+
+export function docsLedgerPath(cwd: string): string {
+  return join(cwd, ".claude", "backlog-agent-sync", "docs-ledger.json");
+}
