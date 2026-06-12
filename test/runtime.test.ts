@@ -76,4 +76,17 @@ describe("buildRuntime", () => {
     expect(deps.resolutionFixedId).toBe(0); // 0（対応済み）が落ちない
     expect(deps.root).toBe(dir);
   });
+
+  it("summarize は既定で注入され（fieldRules 無しでも ON）、\"off\" で無効化される", async () => {
+    mkdirSync(join(dir, ".claude", "backlog-agent-sync"), { recursive: true });
+    const path = join(dir, ".claude", "backlog-agent-sync", "project.json");
+    writeFileSync(path, JSON.stringify({ projectId: 1 }), "utf8");
+    expect((await buildRuntime(dir)).deps.summarize).toBeTypeOf("function"); // 既定 ON
+
+    writeFileSync(path, JSON.stringify({ projectId: 1, fieldRules: { summarize: "claude" } }), "utf8");
+    expect((await buildRuntime(dir)).deps.summarize).toBeTypeOf("function");
+
+    writeFileSync(path, JSON.stringify({ projectId: 1, fieldRules: { summarize: "off" } }), "utf8");
+    expect((await buildRuntime(dir)).deps.summarize).toBeUndefined(); // "off" で無効化
+  });
 });

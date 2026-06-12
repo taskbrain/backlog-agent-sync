@@ -117,7 +117,7 @@ describe("runStop", () => {
     expect(adapter.addComment).not.toHaveBeenCalled();
   });
 
-  it("ターン要約に依頼・結果・変更ファイル集計・実行コマンドが入る", async () => {
+  it("ターン要約は依頼・結果・変更のみ（実行コマンド・ツール件数は出さない）", async () => {
     const store = new StateStore(dir);
     await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "バグを直してテストも追加して"; });
     const base = { tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", raw: {} } as const;
@@ -137,12 +137,42 @@ describe("runStop", () => {
     expect(body).toContain("直しました。テストも追加済みです。");
     expect(body).toContain("### 変更");
     expect(body).toContain("- src/foo.ts(2)"); // vcs 無し → リンク無しの従来表記
-    expect(body).toContain("### 実行");
-    expect(body).toContain("- npm test --watch（1件）");
-    expect(body).toContain("（ツール使用 3 件）");
+    expect(body).not.toContain("### 実行"); // G20: コマンド一覧は全廃
+    expect(body).not.toContain("ツール使用"); // G20: ツール件数は全廃
     const st = await store.loadOrCreate("s1");
     expect(st.turnCount).toBe(1);
     expect(st.lastPrompt).toBeUndefined(); // 消費後クリア
+  });
+
+  it("lastPromptSummary があれば ### 依頼 に原文ではなく整理結果を載せ、使用後にクリアする", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.lastPrompt = "とても長い原文のプロンプトがここに入っている";
+      s.lastPromptSummary = "ログインバグの修正\n- 500エラーの原因調査\n- テスト追加";
+    });
+    const adapter = adapterWithIssue();
+    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: adapter as any, projectId: 10 });
+    const body = String(adapter.addComment.mock.calls[0][1]);
+    expect(body).toContain("### 依頼");
+    expect(body).toContain("ログインバグの修正");
+    expect(body).toContain("- 500エラーの原因調査");
+    expect(body).not.toContain("とても長い原文"); // 整理結果が主役（原文はフォールバックのみ）
+    const st = await store.loadOrCreate("s1");
+    expect(st.lastPromptSummary).toBeUndefined(); // 使用後クリア
+  });
+
+  it("変更ファイルもコミットも無ければ ### 変更 ごと省略する", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "調査だけして"; });
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: "調査結果です。", raw: {} },
+      { store, adapter: adapter as any, projectId: 10 },
+    );
+    const body = String(adapter.addComment.mock.calls[0][1]);
+    expect(body).toContain("### 結果");
+    expect(body).not.toContain("### 変更");
   });
 
   it("lastAssistantMessage が無ければ transcript 末尾から結果を抽出する（Claude）", async () => {

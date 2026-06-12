@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseArgs } from "../src/cli.js";
+import { parseArgs, main } from "../src/cli.js";
 
 describe("parseArgs", () => {
   it("hook session-start を解釈する", () => {
@@ -38,5 +38,19 @@ describe("parseArgs", () => {
   it("init --vcs の不正値は無視する", () => {
     expect(parseArgs(["init", "--vcs", "bogus"])).toEqual({ cmd: "init" });
     expect(parseArgs(["init", "--vcs"])).toEqual({ cmd: "init" });
+  });
+});
+
+describe("hook 再帰ガード", () => {
+  it("BACKLOG_SYNC_IN_HOOK があれば hook 入口で即 return する（summarize 子プロセスの誤発火防止）", async () => {
+    const prev = process.env.BACKLOG_SYNC_IN_HOOK;
+    process.env.BACKLOG_SYNC_IN_HOOK = "1";
+    try {
+      // ガードが無いと stdin 読込で待ち続ける（= テストはタイムアウトで失敗する）
+      await expect(main(["hook", "stop"])).resolves.toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.BACKLOG_SYNC_IN_HOOK;
+      else process.env.BACKLOG_SYNC_IN_HOOK = prev;
+    }
   });
 });

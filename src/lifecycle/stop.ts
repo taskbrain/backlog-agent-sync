@@ -9,16 +9,7 @@ import { renderer, type MarkupRenderer } from "../markup.js";
 const PROMPT_MAX = 500;
 const RESULT_MAX = 1200;
 const RESULT_MAX_BYTES = 262144;
-const COMMAND_PREVIEW = 3;
 const BODY_MAX = 40000; // Backlog コメント上限は未公表（実測5万）のため安全側で切詰
-const REQUEST_TOOL = "(依頼)"; // user-prompt-submit が積む擬似エントリ（ツール件数から除外）
-
-/** 変更ファイルの集計: "foo.ts(3) / bar.md(1)"。 */
-export function summarizeFiles(entries: ActivityEntry[]): string | undefined {
-  const counts = countFiles(entries);
-  if (counts.size === 0) return undefined;
-  return [...counts.entries()].map(([file, n]) => `${file}(${n})`).join(" / ");
-}
 
 /** 変更ファイル → 回数の Map（リンク化リスト用）。 */
 export function countFiles(entries: ActivityEntry[]): Map<string, number> {
@@ -28,17 +19,6 @@ export function countFiles(entries: ActivityEntry[]): Map<string, number> {
     counts.set(e.detail, (counts.get(e.detail) ?? 0) + 1);
   }
   return counts;
-}
-
-/** 実行コマンドの集計: 先頭3件 + 総数。 */
-export function summarizeCommands(entries: ActivityEntry[]): string | undefined {
-  const cmds = entries.filter((e) => e.tool === "Bash" && e.detail).map((e) => e.detail as string);
-  if (cmds.length === 0) return undefined;
-  return `${cmds.slice(0, COMMAND_PREVIEW).join(" / ")}（${cmds.length}件）`;
-}
-
-export function countTools(entries: ActivityEntry[]): number {
-  return entries.filter((e) => e.tool !== REQUEST_TOOL).length;
 }
 
 /** 最終回答: Claude/Codex とも payload（last_assistant_message）優先、無ければ transcript 末尾から抽出。 */
@@ -105,18 +85,16 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
   const md = renderer(deps.textFormattingRule ?? "markdown");
   const entries = st.activityBuffer;
   const turn = (st.turnCount ?? 0) + 1;
-  const prompt = st.lastPrompt?.trim();
+  // 依頼は LLM 整理（lastPromptSummary）を主役に、無ければ原文へフォールバック
+  const request = st.lastPromptSummary?.trim() || st.lastPrompt?.trim()?.slice(0, PROMPT_MAX);
   const result = await resolveResult(ev);
   const changeLines = await buildChangeLines(ev, deps, md, entries, st.turnStartHead);
-  const commands = summarizeCommands(entries);
 
-  // ターン要約 v2（設計4.2）
+  // ターン要約 v3（G20: 人間向けに純化。ツール件数・コマンド一覧は出さない）
   const lines: string[] = [md.heading(2, `ターン #${turn}`)];
-  if (prompt) lines.push(md.heading(3, "依頼"), prompt.slice(0, PROMPT_MAX));
+  if (request) lines.push(md.heading(3, "依頼"), request);
   if (result) lines.push(md.heading(3, "結果"), result);
-  if (changeLines.length) lines.push(md.heading(3, "変更"), ...changeLines);
-  if (commands) lines.push(md.heading(3, "実行"), md.listItem(commands));
-  lines.push(`（ツール使用 ${countTools(entries)} 件）`);
+  if (changeLines.length) lines.push(md.heading(3, "変更"), ...changeLines); // 変更が無ければセクションごと省略
   const body = lines.join("\n").slice(0, BODY_MAX);
 
   // 送信前に耐久記録（オフラインでも欠落しない・§15）。enqueue id はターン毎に一意
@@ -131,10 +109,11 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
     await store.enqueue(ev.sessionId, { id: `stop-status:${ev.sessionId}:${turn}`, op: "update_issue", payload, attempts: 0 });
   }
 
-  // enqueue 済みのためバッファ/lastPrompt/turnStartHead はクリアして安全。lastStatus は楽観更新
+  // enqueue 済みのためバッファ/lastPrompt/lastPromptSummary/turnStartHead はクリアして安全。lastStatus は楽観更新
   await store.withLock(ev.sessionId, (s) => {
     s.activityBuffer = [];
     s.lastPrompt = undefined;
+    s.lastPromptSummary = undefined;
     s.turnStartHead = undefined;
     s.turnCount = turn;
     if (flipStatus) s.lastStatus = "resolved";

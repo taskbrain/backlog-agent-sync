@@ -15,6 +15,7 @@ function fakeAdapter() {
     createIssue: vi.fn().mockResolvedValue({ id: 100, issueKey: "PROJ-100" }),
     setStatus: vi.fn().mockResolvedValue(undefined),
     addComment: vi.fn().mockResolvedValue(undefined),
+    updateDescription: vi.fn().mockResolvedValue(undefined),
     findByMarker: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -37,7 +38,7 @@ describe("runUserPromptSubmit", () => {
     expect(input.description).toContain("[[bas:session:s1]]"); // 機械マーカー
     expect(input.description).toContain("session_id: s1");
     expect(input.description).toContain("エージェント: claude");
-    expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-100", 2, expect.any(String)); // 処理中で開始
+    expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-100", 2, undefined); // 処理中で開始（開始コメントは投稿しない）
     const st = await store.loadOrCreate("s1");
     expect(st.issueKey).toBe("PROJ-100");
     expect(st.initialPrompt).toContain("ログインバグ");
@@ -54,7 +55,7 @@ describe("runUserPromptSubmit", () => {
     expect(summary.endsWith("…")).toBe(true);
   });
 
-  it("2回目以降は作成せず、追加依頼をバッファに積み in_progress へフリップする", async () => {
+  it("2回目以降は作成せず in_progress へフリップする（(依頼)バッファは積まない）", async () => {
     const store = new StateStore(dir);
     await store.withLock("s1", (s) => {
       s.issueKey = "PROJ-1";
@@ -71,9 +72,7 @@ describe("runUserPromptSubmit", () => {
     expect(st.lastStatus).toBe("in_progress");
     expect(st.initialPrompt).toBe("最初の依頼"); // 上書きしない
     expect(st.lastPrompt).toContain("追加でテスト");
-    const entry = st.activityBuffer[0];
-    expect(entry.tool).toBe("(依頼)");
-    expect(entry.detail?.length).toBe(120); // 先頭120字
+    expect(st.activityBuffer.length).toBe(0); // G20: (依頼)擬似エントリは廃止（ターン要約の ### 依頼 で表現）
   });
 
   it("lastStatus が既に in_progress ならステータス PATCH をスキップする（code 7 回避）", async () => {
@@ -86,7 +85,7 @@ describe("runUserPromptSubmit", () => {
     await runUserPromptSubmit(promptEv("続けて"), { store, adapter: adapter as any, ...deps });
     expect(adapter.setStatus).not.toHaveBeenCalled();
     const st = await store.loadOrCreate("s1");
-    expect(st.activityBuffer.length).toBe(1); // 記録はされる
+    expect(st.lastPrompt).toBe("続けて"); // 記録はされる
   });
 
   it("課題作成が失敗してもプロンプト処理を止めず lastPrompt は保存される", async () => {
@@ -159,5 +158,67 @@ describe("runUserPromptSubmit", () => {
     await runUserPromptSubmit(promptEv("依頼"), { store, adapter: adapter as any, ...deps, fields });
     expect(adapter.createIssue).toHaveBeenCalledOnce();
     expect(adapter.createIssue).toHaveBeenCalledWith(expect.objectContaining({ priorityId: 3 })); // 既定値のまま
+  });
+
+  it("初回: summarize 成功時に説明を v3（依頼内容/環境/元プロンプト+マーカー）へ PATCH する", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    const summarize = vi.fn().mockResolvedValue("ログインバグの修正\n- 500エラーの原因調査\n- テスト追加");
+    const prompt = "ログインバグを直して\n再現手順: フォーム送信で500";
+    await runUserPromptSubmit(promptEv(prompt), { store, adapter: adapter as any, ...deps, summarize });
+    expect(summarize).toHaveBeenCalledWith(prompt);
+    expect(adapter.updateDescription).toHaveBeenCalledOnce();
+    const [issueKey, description] = adapter.updateDescription.mock.calls[0];
+    expect(issueKey).toBe("PROJ-100");
+    expect(description).toContain("## 依頼内容");
+    expect(description).toContain("- 500エラーの原因調査"); // まとめ直しが主役
+    expect(description).toContain("## 環境"); // 環境は維持
+    expect(description).toContain("## 元プロンプト");
+    expect(description).toContain("再現手順: フォーム送信で500"); // 原文は別枠
+    expect(description).toContain("[[bas:session:s1]]"); // マーカー維持
+    const st = await store.loadOrCreate("s1");
+    expect(st.lastPromptSummary).toContain("- 500エラーの原因調査"); // 初回ターンの要約コメントにも使う
+  });
+
+  it("初回: summarize が undefined なら説明 PATCH しない（従来説明のまま）", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    const summarize = vi.fn().mockResolvedValue(undefined);
+    await runUserPromptSubmit(promptEv("短い依頼"), { store, adapter: adapter as any, ...deps, summarize });
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    expect(adapter.updateDescription).not.toHaveBeenCalled();
+  });
+
+  it("2回目以降: summarize 結果を lastPromptSummary に保存する（失敗時は undefined で上書き）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.lastPromptSummary = "前ターンの残骸";
+    });
+    const adapter = fakeAdapter();
+    const summarize = vi.fn().mockResolvedValue("追加対応\n- テストも書く");
+    await runUserPromptSubmit(promptEv("追加でテストも書いて"), { store, adapter: adapter as any, ...deps, summarize });
+    let st = await store.loadOrCreate("s1");
+    expect(st.lastPromptSummary).toBe("追加対応\n- テストも書く");
+
+    const failing = vi.fn().mockRejectedValue(new Error("llm error"));
+    await runUserPromptSubmit(promptEv("さらに追加"), { store, adapter: adapter as any, ...deps, summarize: failing });
+    st = await store.loadOrCreate("s1");
+    expect(st.lastPromptSummary).toBeUndefined(); // 残骸が残らない（stop は原文へフォールバック）
+    expect(st.lastPrompt).toBe("さらに追加");
+  });
+
+  it("Codex セッション（ev.tool=codex）では summarize を呼ばない", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    const summarize = vi.fn();
+    await runUserPromptSubmit(
+      { tool: "codex", event: "user-prompt-submit", sessionId: "s1", cwd: "/repo", prompt: "Codexからの依頼です。長さ確保のため追記。", raw: {} },
+      { store, adapter: adapter as any, ...deps, summarize },
+    );
+    expect(summarize).not.toHaveBeenCalled();
+    expect(adapter.createIssue).toHaveBeenCalledOnce(); // 課題作成は通常どおり
+    expect(adapter.updateDescription).not.toHaveBeenCalled();
   });
 });

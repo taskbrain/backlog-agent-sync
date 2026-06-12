@@ -45,6 +45,10 @@ export class BacklogAdapter implements TrackerAdapter {
     await this.rest.addComment(issueIdOrKey, content);
   }
 
+  async updateDescription(issueIdOrKey: string | number, description: string): Promise<void> {
+    await this.rest.updateIssue({ issueIdOrKey, description });
+  }
+
   async findByMarker(marker: string): Promise<FoundIssue | undefined> {
     const found = await this.rest.findIssues({ keyword: marker, count: 1 });
     return found[0]; // findIssues は status 名（FoundIssue.status）を含む
