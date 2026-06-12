@@ -109,4 +109,55 @@ describe("runUserPromptSubmit", () => {
     const st = await store.loadOrCreate("s1");
     expect(st.lastPrompt).toBe("依頼"); // ローカル記録は維持
   });
+
+  it("turnStartHead を state に保存する（git DI 経由）", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    const HEAD = "f".repeat(40);
+    const git = {
+      headSha: vi.fn().mockResolvedValue(HEAD),
+      branchName: vi.fn().mockResolvedValue("main"),
+      commitsBetween: vi.fn().mockResolvedValue({ commits: [] }),
+      isOnRemote: vi.fn().mockResolvedValue(true),
+    };
+    await runUserPromptSubmit(promptEv("依頼"), { store, adapter: adapter as any, ...deps, git: git as any, root: "/root" });
+    expect(git.headSha).toHaveBeenCalledWith("/root"); // root を優先（無ければ ev.cwd）
+    const st = await store.loadOrCreate("s1");
+    expect(st.turnStartHead).toBe(HEAD);
+  });
+
+  it("git が使えなくても turnStartHead 無しで動作する", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    const git = {
+      headSha: vi.fn().mockResolvedValue(undefined),
+      branchName: vi.fn().mockResolvedValue(undefined),
+      commitsBetween: vi.fn().mockResolvedValue({ commits: [], reason: "x" }),
+      isOnRemote: vi.fn().mockResolvedValue(false),
+    };
+    await runUserPromptSubmit(promptEv("依頼"), { store, adapter: adapter as any, ...deps, git: git as any });
+    expect(adapter.createIssue).toHaveBeenCalledOnce(); // 課題作成は通常どおり
+    const st = await store.loadOrCreate("s1");
+    expect(st.turnStartHead).toBeUndefined();
+  });
+
+  it("deps.fields があれば createIssue 入力にフィールドをマージする", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    const fields = vi.fn().mockResolvedValue({ assigneeId: 5, priorityId: 4, categoryId: [9], milestoneId: [70], versionId: undefined });
+    await runUserPromptSubmit(promptEv("緊急のバグを直して"), { store, adapter: adapter as any, ...deps, fields });
+    expect(fields).toHaveBeenCalledWith("緊急のバグを直して");
+    const input = adapter.createIssue.mock.calls[0][0];
+    expect(input).toMatchObject({ assigneeId: 5, priorityId: 4, categoryId: [9], milestoneId: [70] }); // priorityId は上書き
+    expect("versionId" in input).toBe(false); // undefined 値のキーは除去（既定値を壊さない）
+  });
+
+  it("fields の解決が失敗しても課題作成は継続する（非ブロッキング）", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    const fields = vi.fn().mockRejectedValue(new Error("fields error"));
+    await runUserPromptSubmit(promptEv("依頼"), { store, adapter: adapter as any, ...deps, fields });
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    expect(adapter.createIssue).toHaveBeenCalledWith(expect.objectContaining({ priorityId: 3 })); // 既定値のまま
+  });
 });

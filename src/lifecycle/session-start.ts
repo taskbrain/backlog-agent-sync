@@ -1,6 +1,10 @@
-import type { CanonicalEvent, SessionState } from "../types.js";
+import type { CanonicalEvent, SessionState, QueuedOp, VcsConfig, TextFormattingRule, IssueFieldOverrides } from "../types.js";
 import type { StateStore } from "../state/store.js";
 import type { TrackerAdapter } from "../tracker/adapter.js";
+import type { GitOps } from "../vcs/git.js";
+import { defaultGitOps } from "../vcs/git.js";
+import { repoUrl } from "../vcs/linker.js";
+import { renderer } from "../markup.js";
 import { runPull, formatDigest, type PullRest } from "../inbound/pull.js";
 
 export interface LifecycleDeps {
@@ -10,16 +14,44 @@ export interface LifecycleDeps {
   issueTypeId?: number;
   priorityId?: number;
   rest?: PullRest; // インバウンド pull 用（未指定なら pull をスキップ）
+  // ---- G19: VCS 連携 / フィールド動的設定（すべて optional・後方互換） ----
+  vcs?: VcsConfig; // リンク生成（無ければリンク無しの従来表記）
+  textFormattingRule?: TextFormattingRule; // 無ければ markdown
+  fields?: (prompt: string) => Promise<IssueFieldOverrides> | IssueFieldOverrides; // パートB fields.ts の resolveCreateFields を束縛して注入
+  resolutionFixedId?: number; // 完了理由。0 もあり得るため != null で判定すること
+  root?: string; // buildRuntime の実行ルート（turnStartHead / git 認識用。無ければ ev.cwd）
+  git?: GitOps; // git 操作の DI（テスト用。無ければ実 git）
 }
 
 export interface HookOutput { additionalContext?: string; }
 
 const SUMMARY_MAX = 60;
-const DESCRIPTION_PROMPT_MAX = 2000;
+const DESCRIPTION_PROMPT_MAX = 4000;
+const OVERVIEW_MAX = 300;
 
 /** state 消失時の find 用機械マーカー（seed の [[bas:epic:]] と同じ二重化思想）。 */
 export function sessionMarker(sessionId: string): string {
   return `[[bas:session:${sessionId}]]`;
+}
+
+/**
+ * drain 用の共通 op ハンドラ（stop/subagent-stop/user-prompt-submit/session-end で共用）。
+ * update_issue は resolutionId を持つ場合のみ 4 引数で渡す（id:0 の falsy 罠に注意し != null 判定）。
+ */
+export function opDrainHandler(adapter: TrackerAdapter, issueKey: string): (op: QueuedOp) => Promise<boolean> {
+  return async (op) => {
+    if (op.op === "add_comment") {
+      await adapter.addComment(issueKey, String(op.payload.content));
+      return true;
+    }
+    if (op.op === "update_issue") {
+      const rid = op.payload.resolutionId;
+      if (rid != null) await adapter.setStatus(issueKey, Number(op.payload.statusId), undefined, Number(rid));
+      else await adapter.setStatus(issueKey, Number(op.payload.statusId), undefined);
+      return true;
+    }
+    return true;
+  };
 }
 
 /** タイトル: プロンプト1行目を空白正規化して max60字。無ければ従来形式へフォールバック。 */
@@ -32,20 +64,45 @@ function buildIssueSummary(ev: CanonicalEvent, st: SessionState): string {
   return `[セッション] ${ev.sessionId.slice(0, 8)} (${new Date().toISOString().slice(0, 16)})`;
 }
 
-/** 説明: 依頼全文（max2000字）+ メタ + 機械マーカー。 */
-function buildIssueDescription(ev: CanonicalEvent, st: SessionState): string {
+/** 概要 = 初回プロンプトの先頭段落（改行・空白を正規化、max300字）。 */
+function buildOverview(prompt: string): string {
+  const para = (prompt.split(/\n\s*\n/)[0] ?? "").replace(/\s+/g, " ").trim();
+  return para.length > OVERVIEW_MAX ? `${para.slice(0, OVERVIEW_MAX)}…` : para;
+}
+
+/** 説明 v2（設計4.1）: ## 概要 / ## 依頼(原文) 4000字 / ## 環境 + 機械マーカー。 */
+function buildIssueDescription(ev: CanonicalEvent, st: SessionState, deps: LifecycleDeps, branch?: string): string {
+  const md = renderer(deps.textFormattingRule ?? "markdown");
   const prompt = (st.initialPrompt ?? ev.prompt ?? "").trim();
   const model = typeof (ev.raw as any)?.model === "string" && (ev.raw as any).model !== "" ? ` (${(ev.raw as any).model})` : "";
-  return [
-    prompt ? prompt.slice(0, DESCRIPTION_PROMPT_MAX) : "自動生成: backlog-agent-sync",
-    "",
-    "---",
-    `開始日時: ${new Date().toISOString()}`,
-    `エージェント: ${ev.tool}${model}`,
-    `cwd: ${ev.cwd}`,
-    `session_id: ${ev.sessionId}`,
-    sessionMarker(ev.sessionId),
-  ].join("\n");
+  const lines: string[] = [];
+  lines.push(md.heading(2, "概要"));
+  lines.push(buildOverview(prompt) || "自動生成: backlog-agent-sync");
+  lines.push("");
+  if (prompt) {
+    lines.push(md.heading(2, "依頼(原文)"));
+    lines.push(prompt.slice(0, DESCRIPTION_PROMPT_MAX));
+    lines.push("");
+  }
+  lines.push(md.heading(2, "環境"));
+  lines.push(md.listItem(`エージェント: ${ev.tool}${model}`));
+  const repo = deps.vcs ? repoUrl(deps.vcs) : undefined;
+  if (repo) lines.push(md.listItem(`リポジトリ: ${repo}`));
+  lines.push(md.listItem(`ブランチ: ${branch ?? "-"} / 作業ディレクトリ: ${ev.cwd}`));
+  lines.push(md.listItem(`開始: ${new Date().toISOString()} / session_id: ${ev.sessionId}`));
+  lines.push(sessionMarker(ev.sessionId));
+  return lines.join("\n");
+}
+
+/** deps.fields による動的フィールド解決（失敗 / 未注入は空 = 従来挙動）。undefined 値のキーは除去。 */
+async function resolveFieldOverrides(ev: CanonicalEvent, deps: LifecycleDeps, st: SessionState): Promise<IssueFieldOverrides> {
+  if (!deps.fields) return {};
+  try {
+    const raw = await deps.fields(st.initialPrompt ?? ev.prompt ?? "");
+    return Object.fromEntries(Object.entries(raw ?? {}).filter(([, v]) => v !== undefined)) as IssueFieldOverrides;
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -66,12 +123,16 @@ export async function ensureSessionIssue(ev: CanonicalEvent, deps: LifecycleDeps
     return found.issueKey;
   }
 
+  const git = deps.git ?? defaultGitOps;
+  const branch = await git.branchName(deps.root ?? ev.cwd);
+  const overrides = await resolveFieldOverrides(ev, deps, st);
   const ref = await deps.adapter.createIssue({
     projectId: deps.projectId,
     summary: buildIssueSummary(ev, st),
     issueTypeId: deps.issueTypeId,
     priorityId: deps.priorityId,
-    description: buildIssueDescription(ev, st),
+    description: buildIssueDescription(ev, st, deps, branch),
+    ...overrides, // assigneeId / priorityId / categoryId[] / milestoneId[] / versionId[]（priorityId は上書き優先）
   });
   await deps.store.withLock(ev.sessionId, (s) => {
     s.issueKey = ref.issueKey; s.issueId = ref.id; s.statusMap = st.statusMap; s.lastStatus = "in_progress";

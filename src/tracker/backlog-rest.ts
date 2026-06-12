@@ -12,9 +12,23 @@ export interface ProjectRef { id: number; projectKey: string; name: string; }
 export interface CreateIssueInput {
   projectId: number; summary: string; issueTypeId: number; priorityId: number;
   description?: string; parentIssueId?: number; assigneeId?: number;
+  categoryId?: number[]; milestoneId?: number[]; versionId?: number[];
 }
 export interface UpdateIssueInput {
-  issueIdOrKey: string | number; statusId?: number; comment?: string; summary?: string; description?: string; resolutionId?: number;
+  issueIdOrKey: string | number; statusId?: number; comment?: string; summary?: string; description?: string;
+  /** 注: 「対応済み」は id:0（falsy）。0 も送信される（form() は null/undefined のみ除外）。 */
+  resolutionId?: number;
+}
+export interface CategoryDef { id: number; name: string; }
+/** マイルストーンと発生バージョンは共用（GET /projects/:key/versions）。 */
+export interface VersionDef { id: number; name: string; startDate?: string; releaseDueDate?: string; archived?: boolean; }
+/** 注: 「対応済み」は id:0 が正常値（falsy 罠に注意）。 */
+export interface ResolutionDef { id: number; name: string; }
+export interface ProjectInfo { id: number; textFormattingRule: string; }
+export interface GitRepoDef { id: number; name: string; httpUrl?: string; }
+export interface PullRequestDef {
+  id: number; number: number; summary: string; branch: string; base: string;
+  issue?: { id: number; issueKey: string };
 }
 
 interface Deps { fetch?: typeof fetch; rateLimiter?: Pick<RateLimiter, "beforeRequest" | "handle429">; }
@@ -35,7 +49,12 @@ export class BacklogRest {
     const sp = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
       if (v === undefined || v === null) continue;
-      sp.append(k, String(v));
+      if (Array.isArray(v)) {
+        // Backlog の配列パラメータは categoryId[] 形式で同名キーを反復送信する
+        for (const item of v) sp.append(`${k}[]`, String(item));
+      } else {
+        sp.append(k, String(v));
+      }
     }
     return sp.toString();
   }
@@ -83,6 +102,66 @@ export class BacklogRest {
 
   async getPriorities(): Promise<PriorityDef[]> {
     return this.request("GET", "/priorities", "read");
+  }
+
+  async getCategories(projectKey: string): Promise<CategoryDef[]> {
+    return this.request("GET", `/projects/${encodeURIComponent(projectKey)}/categories`, "read");
+  }
+
+  /** マイルストーンと発生バージョンの共用一覧。 */
+  async getVersions(projectKey: string): Promise<VersionDef[]> {
+    return this.request("GET", `/projects/${encodeURIComponent(projectKey)}/versions`, "read");
+  }
+
+  /** 完了理由一覧。「対応済み」は id:0 が正常値。 */
+  async getResolutions(): Promise<ResolutionDef[]> {
+    return this.request("GET", "/resolutions", "read");
+  }
+
+  /** プロジェクト情報（textFormattingRule: "markdown" | "backlog"）。 */
+  async getProjectInfo(projectKey: string): Promise<ProjectInfo> {
+    const r = await this.request("GET", `/projects/${encodeURIComponent(projectKey)}`, "read");
+    return { id: r.id, textFormattingRule: r.textFormattingRule };
+  }
+
+  async getGitRepositories(projectKey: string): Promise<GitRepoDef[]> {
+    const arr = await this.request("GET", `/projects/${encodeURIComponent(projectKey)}/git/repositories`, "read");
+    return (arr as any[]).map((x) => ({ id: x.id, name: x.name, httpUrl: x.httpUrl }));
+  }
+
+  async getGitPullRequests(
+    projectKey: string,
+    repoIdOrName: string | number,
+    query: { statusId?: number[] } = {},
+  ): Promise<PullRequestDef[]> {
+    const path = `/projects/${encodeURIComponent(projectKey)}/git/repositories/${encodeURIComponent(String(repoIdOrName))}/pullRequests`;
+    const sp = new URLSearchParams();
+    sp.append("apiKey", this.cfg.apiKey);
+    for (const s of query.statusId ?? []) sp.append("statusId[]", String(s));
+    const url = `${this.base(path)}?${sp.toString()}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this.rl.beforeRequest("read");
+      const res = await this.fetch(url);
+      if (res.status === 429 && attempt === 0) { await this.rl.handle429(res.headers); continue; }
+      if (!res.ok) throw new Error(`Backlog GET ${path} -> ${res.status}`);
+      const arr = (await res.json()) as any[];
+      return arr.map((x) => ({
+        id: x.id, number: x.number, summary: x.summary ?? "", branch: x.branch ?? "", base: x.base ?? "",
+        issue: x.issue ? { id: x.issue.id, issueKey: x.issue.issueKey } : undefined,
+      }));
+    }
+    throw new Error(`Backlog GET ${path} -> 429 (リトライ上限)`);
+  }
+
+  /** PR の更新（課題への関連付けは issueId=数値ID で PATCH）。 */
+  async updateGitPullRequest(
+    projectKey: string,
+    repoIdOrName: string | number,
+    number: number,
+    patch: { issueId?: number; comment?: string },
+  ): Promise<void> {
+    const path = `/projects/${encodeURIComponent(projectKey)}/git/repositories/${encodeURIComponent(String(repoIdOrName))}/pullRequests/${number}`;
+    await this.request("PATCH", path, "write", patch as Record<string, unknown>);
   }
 
   async createIssue(input: CreateIssueInput): Promise<IssueRef> {

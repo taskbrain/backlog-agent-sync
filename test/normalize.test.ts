@@ -44,6 +44,15 @@ describe("normalizeClaude", () => {
     });
     expect(ev.transcriptPath).toBe("/tmp/t.jsonl");
   });
+
+  it("Stop は last_assistant_message（Claude も stdin で直接受領・2026-06 仕様）を拾う", () => {
+    const ev = normalizeClaude("stop", {
+      session_id: "s1", cwd: "/repo", hook_event_name: "Stop", stop_hook_active: false,
+      last_assistant_message: "修正が完了しました", transcript_path: "/tmp/t.jsonl",
+    });
+    expect(ev.lastAssistantMessage).toBe("修正が完了しました");
+    expect(ev.transcriptPath).toBe("/tmp/t.jsonl"); // フォールバック経路も維持
+  });
 });
 
 describe("normalizeCodex", () => {

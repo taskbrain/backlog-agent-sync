@@ -30,4 +30,13 @@ describe("parseArgs", () => {
   it("flush --session を解釈する", () => {
     expect(parseArgs(["flush", "--session", "s1"])).toEqual({ cmd: "flush", sessionId: "s1" });
   });
+  it("init を解釈する（--vcs は任意）", () => {
+    expect(parseArgs(["init"])).toEqual({ cmd: "init" });
+    expect(parseArgs(["init", "--vcs", "backlog"])).toEqual({ cmd: "init", vcs: "backlog" });
+    expect(parseArgs(["init", "--vcs", "github"])).toEqual({ cmd: "init", vcs: "github" });
+  });
+  it("init --vcs の不正値は無視する", () => {
+    expect(parseArgs(["init", "--vcs", "bogus"])).toEqual({ cmd: "init" });
+    expect(parseArgs(["init", "--vcs"])).toEqual({ cmd: "init" });
+  });
 });

@@ -14,8 +14,8 @@ export interface CanonicalEvent {
   toolInput?: { filePath?: string; command?: string }; // post-tool 要旨（全文は持たない）
   agentType?: string; // subagent-stop
   stopHookActive?: boolean; // stop
-  lastAssistantMessage?: string; // stop（Codex payload）
-  transcriptPath?: string; // stop（Claude transcript JSONL）
+  lastAssistantMessage?: string; // stop（Claude/Codex とも Stop stdin で受領。2026-06 時点の公式仕様）
+  transcriptPath?: string; // stop（Claude transcript JSONL。lastAssistantMessage 欠落時のフォールバック）
   reason?: string; // session-end
   raw: unknown;
 }
@@ -57,6 +57,7 @@ export interface SessionState {
   initialPrompt?: string; // 初回プロンプト（課題タイトル/説明の素材）
   lastPrompt?: string; // このターンのプロンプト（stop で消費・クリア）
   turnCount?: number; // ターン要約の連番
+  turnStartHead?: string; // ターン開始時の HEAD SHA（stop のコミット列挙に使用）
 }
 
 export interface BacklogConfig {
@@ -64,4 +65,64 @@ export interface BacklogConfig {
   apiKey: string;
   projectKey: string;
   projectId?: number;
+}
+
+// ---- VCS 連携 / 課題フィールド（G19。project.json の契約 — init(パートB) が書き、runtime/fields が読む） ----
+
+export type VcsKind = "github" | "backlog" | "generic";
+
+/** project.json `vcs`。generic はリンク生成なし。 */
+export interface VcsConfig {
+  kind: VcsKind;
+  owner?: string; // github
+  repo?: string; // github
+  webBase?: string; // backlog: 例 https://space.backlog.jp
+  projectKey?: string; // backlog
+  repoName?: string; // backlog
+}
+
+export type TextFormattingRule = "markdown" | "backlog";
+
+export interface IdName { id: number; name: string; }
+
+export interface VersionDef { id: number; name: string; startDate?: string; releaseDueDate?: string; archived?: boolean; }
+
+/** project.json `fieldRules`（設計3.2の決定論ルール設定）。 */
+export interface FieldRules {
+  assignSelf?: boolean;
+  priorityKeywords?: { high?: string[]; low?: string[] };
+  categoryRules?: Record<string, string[]>; // カテゴリ名 → キーワード/パス片
+  milestone?: string; // "current" | "<name>" | "off"
+  affectedVersion?: string; // "<name>" | "off"
+  resolutionOnResolve?: boolean;
+  summarize?: "off" | "claude"; // LLM要約のopt-in（既定off。"claude"はANTHROPIC_API_KEY必須・クレジット消費）
+}
+
+/** project.json 全体（init が書くキャッシュ）。すべて optional = 旧ファイル後方互換。 */
+export interface ProjectCache {
+  projectKey?: string;
+  projectId?: number;
+  statusMap?: StatusMap;
+  issueTypes?: IdName[];
+  priorities?: IdName[];
+  categories?: IdName[];
+  versions?: VersionDef[]; // マイルストーン兼発生バージョン
+  resolutions?: IdName[];
+  myself?: { id: number; name: string };
+  defaultIssueTypeId?: number;
+  defaultPriorityId?: number;
+  resolutionFixedId?: number; // 「対応済み」= 0 もあり得る（falsy 罠に注意・!= null 判定）
+  textFormattingRule?: TextFormattingRule;
+  vcs?: VcsConfig;
+  fieldRules?: FieldRules;
+  resolvedAt?: string;
+}
+
+/** 課題作成時の動的フィールド（fields.ts resolveCreateFields の戻り値契約）。undefined のキーは含めないこと。 */
+export interface IssueFieldOverrides {
+  assigneeId?: number;
+  priorityId?: number;
+  categoryId?: number[];
+  milestoneId?: number[];
+  versionId?: number[]; // 発生バージョン
 }

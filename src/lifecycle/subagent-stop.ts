@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CanonicalEvent } from "../types.js";
-import { ensureSessionIssue, type LifecycleDeps, type HookOutput } from "./session-start.js";
+import { ensureSessionIssue, opDrainHandler, type LifecycleDeps, type HookOutput } from "./session-start.js";
 import { summarizeFiles, summarizeCommands, countTools } from "./stop.js";
 
 export async function runSubagentStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<HookOutput> {
@@ -42,11 +42,7 @@ export async function runSubagentStop(ev: CanonicalEvent, deps: LifecycleDeps): 
   // 送信前に耐久記録（オフラインでも欠落しない）
   await store.enqueue(ev.sessionId, { id: `subagent-stop:${material}`, op: "add_comment", payload: { content: body }, attempts: 0 });
   // flush と同等の op 分岐: 残留中の update_issue（過去 stop のオフライン分）を無送信で除去しない
-  await store.drain(ev.sessionId, async (op) => {
-    if (op.op === "add_comment") { await adapter.addComment(issueKey, String(op.payload.content)); return true; }
-    if (op.op === "update_issue") { await adapter.setStatus(issueKey, Number(op.payload.statusId), undefined); return true; }
-    return true;
-  });
+  await store.drain(ev.sessionId, opDrainHandler(adapter, issueKey));
 
   await store.withLock(ev.sessionId, (s) => { s.activityBuffer = []; });
   return {};

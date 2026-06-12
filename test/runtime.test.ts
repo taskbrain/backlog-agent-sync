@@ -57,5 +57,23 @@ describe("buildRuntime", () => {
     expect(deps.projectId).toBe(10);
     expect(deps.issueTypeId).toBeUndefined();
     expect(deps.priorityId).toBeUndefined();
+    expect(deps.vcs).toBeUndefined();
+    expect(deps.textFormattingRule).toBeUndefined();
+    expect(deps.resolutionFixedId).toBeUndefined();
+  });
+
+  it("project.json の vcs/textFormattingRule/resolutionFixedId(0) を deps へ注入し root も設定する", async () => {
+    mkdirSync(join(dir, ".claude", "backlog-agent-sync"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "backlog-agent-sync", "project.json"), JSON.stringify({
+      projectId: 1,
+      vcs: { kind: "github", owner: "o", repo: "r" },
+      textFormattingRule: "backlog",
+      resolutionFixedId: 0,
+    }), "utf8");
+    const { deps } = await buildRuntime(dir);
+    expect(deps.vcs).toEqual({ kind: "github", owner: "o", repo: "r" });
+    expect(deps.textFormattingRule).toBe("backlog");
+    expect(deps.resolutionFixedId).toBe(0); // 0（対応済み）が落ちない
+    expect(deps.root).toBe(dir);
   });
 });
