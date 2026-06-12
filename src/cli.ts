@@ -8,13 +8,20 @@ import { runSessionEnd } from "./lifecycle/session-end.js";
 import type { LifecycleEvent } from "./types.js";
 import type { SeedLedger } from "./seed/apply.js";
 
-export interface ParsedArgs { cmd: string; event?: LifecycleEvent; dryRun?: boolean; planPath?: string; sessionId?: string; }
+export interface ParsedArgs { cmd: string; event?: LifecycleEvent; dryRun?: boolean; planPath?: string; sessionId?: string; vcs?: "github" | "backlog" | "generic"; }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd, ...rest] = argv;
   const known = ["hook", "init", "seed", "pull", "status", "flush"];
   if (!cmd || !known.includes(cmd)) return { cmd: "help" };
   if (cmd === "hook") return { cmd, event: rest[0] as LifecycleEvent };
+  if (cmd === "init") {
+    const out: ParsedArgs = { cmd };
+    const i = rest.indexOf("--vcs");
+    const v = i >= 0 ? rest[i + 1] : undefined;
+    if (v === "github" || v === "backlog" || v === "generic") out.vcs = v;
+    return out;
+  }
   if (cmd === "seed") {
     const out: ParsedArgs = { cmd, dryRun: rest.includes("--dry-run") };
     const i = rest.indexOf("--plan");
@@ -39,7 +46,7 @@ function emit(out: { additionalContext?: string }): void {
 export async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
   if (parsed.cmd === "help") {
-    process.stdout.write("backlog-sync <init|seed [--plan <file>] [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic]|seed [--plan <file>] [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
@@ -63,8 +70,12 @@ export async function main(argv: string[]): Promise<void> {
     const { buildRuntime } = await import("./runtime.js");
     const { deps, rest, projectKey } = await buildRuntime(cwd);
     const { runInit } = await import("./init.js");
-    const res = await runInit({ cwd, projectKey, projectId: deps.projectId || undefined }, { adapter: deps.adapter, rest });
-    process.stdout.write(`init OK: project=${projectKey} projectId=${res.projectId} user=${res.me.name} issueTypeId=${res.defaultIssueTypeId ?? "-"} priorityId=${res.defaultPriorityId ?? "-"}\n`);
+    const res = await runInit(
+      { cwd, projectKey, projectId: deps.projectId || undefined, vcsOverride: parsed.vcs },
+      { adapter: deps.adapter, rest },
+    );
+    process.stdout.write(`init OK: project=${projectKey} projectId=${res.projectId} user=${res.me.name} issueTypeId=${res.defaultIssueTypeId ?? "-"} priorityId=${res.defaultPriorityId ?? "-"} vcs=${res.vcs.kind} textFormattingRule=${res.textFormattingRule}\n`);
+    for (const w of res.warnings) process.stdout.write(`WARN: ${w}\n`);
     return;
   }
   if (parsed.cmd === "seed") {
@@ -132,11 +143,10 @@ export async function main(argv: string[]): Promise<void> {
     for (const s of targets) {
       const before = s.pendingQueue?.length ?? 0;
       if (before === 0) { process.stdout.write(`${s.sessionId}: キュー 0 件\n`); continue; }
+      const { opDrainHandler } = await import("./lifecycle/session-start.js");
       await deps.store.drain(s.sessionId, async (op) => {
         if (!s.issueKey) return false; // 課題未紐付の op は残置
-        if (op.op === "add_comment") { await deps.adapter.addComment(s.issueKey, String(op.payload.content)); return true; }
-        if (op.op === "update_issue") { await deps.adapter.setStatus(s.issueKey, Number(op.payload.statusId), undefined); return true; }
-        return true;
+        return opDrainHandler(deps.adapter, s.issueKey)(op); // resolutionId を含む再送経路を共通化
       });
       const after = (await deps.store.loadOrCreate(s.sessionId)).pendingQueue.length;
       process.stdout.write(`${s.sessionId}: 排出 ${before - after}/${before} 件（残 ${after}）\n`);

@@ -1,5 +1,6 @@
 import type { CanonicalEvent } from "../types.js";
-import { ensureSessionIssue, type LifecycleDeps, type HookOutput } from "./session-start.js";
+import { ensureSessionIssue, opDrainHandler, type LifecycleDeps, type HookOutput } from "./session-start.js";
+import { defaultGitOps } from "../vcs/git.js";
 
 const PROMPT_DETAIL_MAX = 120;
 
@@ -20,6 +21,14 @@ export async function runUserPromptSubmit(ev: CanonicalEvent, deps: LifecycleDep
     });
     st.lastPrompt = prompt;
     if (!st.initialPrompt) st.initialPrompt = prompt;
+  }
+
+  // ターン開始時の HEAD を記録（stop のコミット列挙の起点。git 不在/失敗は無視）
+  const git = deps.git ?? defaultGitOps;
+  const head = await git.headSha(deps.root ?? ev.cwd);
+  if (head) {
+    await store.withLock(ev.sessionId, (s) => { s.turnStartHead = head; });
+    st.turnStartHead = head;
   }
 
   try {
@@ -43,11 +52,7 @@ export async function runUserPromptSubmit(ev: CanonicalEvent, deps: LifecycleDep
       const turn = st.turnCount ?? 0;
       await store.enqueue(ev.sessionId, { id: `prompt-status:${ev.sessionId}:${turn}`, op: "update_issue", payload: { statusId: st.statusMap.in_progress }, attempts: 0 });
       await store.withLock(ev.sessionId, (s) => { s.lastStatus = "in_progress"; });
-      await store.drain(ev.sessionId, async (op) => {
-        if (op.op === "add_comment") { await deps.adapter.addComment(issueKey, String(op.payload.content)); return true; }
-        if (op.op === "update_issue") { await deps.adapter.setStatus(issueKey, Number(op.payload.statusId), undefined); return true; }
-        return true;
-      });
+      await store.drain(ev.sessionId, opDrainHandler(deps.adapter, issueKey));
     }
   } catch {
     // 非ブロッキング: 課題作成・状態遷移の失敗でプロンプト処理を止めない

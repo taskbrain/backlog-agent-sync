@@ -36,8 +36,9 @@ export class BacklogAdapter implements TrackerAdapter {
     return this.rest.createIssue(input);
   }
 
-  async setStatus(issueIdOrKey: string | number, statusId: number, comment?: string): Promise<void> {
-    await this.rest.updateIssue({ issueIdOrKey, statusId, ...(comment ? { comment } : {}) });
+  async setStatus(issueIdOrKey: string | number, statusId: number, comment?: string, resolutionId?: number): Promise<void> {
+    // resolutionId=0（対応済み）は有効値のため != null で判定（falsy 罠回避）
+    await this.rest.updateIssue({ issueIdOrKey, statusId, ...(comment ? { comment } : {}), ...(resolutionId != null ? { resolutionId } : {}) });
   }
 
   async addComment(issueIdOrKey: string | number, content: string): Promise<void> {

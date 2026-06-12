@@ -130,11 +130,15 @@ describe("runStop", () => {
       { store, adapter: adapter as any, projectId: 10 },
     );
     const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain("ターン要約 #1");
-    expect(body).toContain("■ 依頼: バグを直してテストも追加して");
-    expect(body).toContain("■ 結果: 直しました。テストも追加済みです。");
-    expect(body).toContain("■ 変更ファイル: src/foo.ts(2)");
-    expect(body).toContain("■ 実行コマンド: npm test --watch（1件）");
+    expect(body).toContain("## ターン #1");
+    expect(body).toContain("### 依頼");
+    expect(body).toContain("バグを直してテストも追加して");
+    expect(body).toContain("### 結果");
+    expect(body).toContain("直しました。テストも追加済みです。");
+    expect(body).toContain("### 変更");
+    expect(body).toContain("- src/foo.ts(2)"); // vcs 無し → リンク無しの従来表記
+    expect(body).toContain("### 実行");
+    expect(body).toContain("- npm test --watch（1件）");
     expect(body).toContain("（ツール使用 3 件）");
     const st = await store.loadOrCreate("s1");
     expect(st.turnCount).toBe(1);
@@ -154,7 +158,9 @@ describe("runStop", () => {
       { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, transcriptPath, raw: {} },
       { store, adapter: adapter as any, projectId: 10 },
     );
-    expect(String(adapter.addComment.mock.calls[0][1])).toContain("■ 結果: transcriptの最終回答");
+    const body = String(adapter.addComment.mock.calls[0][1]);
+    expect(body).toContain("### 結果");
+    expect(body).toContain("transcriptの最終回答");
   });
 
   it("2ターン連続で2コメント投稿され、2回目の resolved 遷移は同値スキップされる", async () => {
@@ -167,11 +173,94 @@ describe("runStop", () => {
     await runStop(ev, { store, adapter: adapter as any, projectId: 10 });
 
     expect(adapter.addComment).toHaveBeenCalledTimes(2); // セッション固定 id で潰れない
-    expect(String(adapter.addComment.mock.calls[0][1])).toContain("ターン要約 #1");
-    expect(String(adapter.addComment.mock.calls[1][1])).toContain("ターン要約 #2");
+    expect(String(adapter.addComment.mock.calls[0][1])).toContain("ターン #1");
+    expect(String(adapter.addComment.mock.calls[1][1])).toContain("ターン #2");
     expect(String(adapter.addComment.mock.calls[1][1])).toContain("依頼2");
     expect(adapter.setStatus).toHaveBeenCalledTimes(1); // 2回目は resolved 同値スキップ（code 7 回避）
     const st = await store.loadOrCreate("s1");
     expect(st.turnCount).toBe(2);
+  });
+
+  it("vcs と git があれば変更ファイル/コミットをリンク化し、未push を注記する", async () => {
+    const store = new StateStore(dir);
+    const HEAD = "a".repeat(40);
+    const COMMIT = "b".repeat(40);
+    const START = "c".repeat(40);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.turnStartHead = START; });
+    await runPostTool(
+      { tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/repo", toolName: "Edit", toolUseId: "a", toolInput: { filePath: "/repo/src/foo.ts" } },
+      { store, adapter: {} as any, projectId: 10 },
+    );
+    const adapter = adapterWithIssue();
+    const git = {
+      headSha: vi.fn().mockResolvedValue(HEAD),
+      branchName: vi.fn().mockResolvedValue("main"),
+      commitsBetween: vi.fn().mockResolvedValue({ commits: [{ sha: COMMIT, subject: "fix: bug" }] }),
+      isOnRemote: vi.fn().mockResolvedValue(false),
+    };
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/repo", stopHookActive: false, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, vcs: { kind: "github", owner: "o", repo: "r" }, git: git as any, root: "/repo" },
+    );
+    const body = String(adapter.addComment.mock.calls[0][1]);
+    expect(body).toContain(`[src/foo.ts(1)](https://github.com/o/r/blob/${HEAD}/src/foo.ts)`); // rev=このターンのHEAD
+    expect(body).toContain(`[${COMMIT.slice(0, 7)} fix: bug](https://github.com/o/r/commit/${COMMIT})（未push）`);
+    expect(git.commitsBetween).toHaveBeenCalledWith("/repo", START);
+    const st = await store.loadOrCreate("s1");
+    expect(st.turnStartHead).toBeUndefined(); // 消費後クリア
+  });
+
+  it("turnStartHead の到達不能（reason）はコミット列挙をスキップして注記する", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.turnStartHead = "c".repeat(40); });
+    const adapter = adapterWithIssue();
+    const git = {
+      headSha: vi.fn().mockResolvedValue(undefined),
+      branchName: vi.fn().mockResolvedValue(undefined),
+      commitsBetween: vi.fn().mockResolvedValue({ commits: [], reason: "コミット列挙不可（開始点が履歴に見つからない可能性）" }),
+      isOnRemote: vi.fn().mockResolvedValue(false),
+    };
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/repo", stopHookActive: false, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, git: git as any, root: "/repo" },
+    );
+    const body = String(adapter.addComment.mock.calls[0][1]);
+    expect(body).toContain("コミット: コミット列挙不可");
+    expect(git.isOnRemote).not.toHaveBeenCalled();
+  });
+
+  it("resolutionFixedId=0 でも resolved 遷移の PATCH に resolutionId が含まれる（falsy 罠回避）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 }; });
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, resolutionFixedId: 0 },
+    );
+    expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-1", 3, undefined, 0); // 完了理由=対応済み(id:0)
+  });
+
+  it("backlog 記法では見出し/リンクが Backlog 記法で出力される", async () => {
+    const store = new StateStore(dir);
+    const HEAD = "a".repeat(40);
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "依頼です"; });
+    await runPostTool(
+      { tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/repo", toolName: "Edit", toolUseId: "a", toolInput: { filePath: "/repo/a.ts" } },
+      { store, adapter: {} as any, projectId: 10 },
+    );
+    const adapter = adapterWithIssue();
+    const git = {
+      headSha: vi.fn().mockResolvedValue(HEAD),
+      branchName: vi.fn().mockResolvedValue("main"),
+      commitsBetween: vi.fn().mockResolvedValue({ commits: [] }),
+      isOnRemote: vi.fn().mockResolvedValue(true),
+    };
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/repo", stopHookActive: false, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, textFormattingRule: "backlog", vcs: { kind: "github", owner: "o", repo: "r" }, git: git as any, root: "/repo" },
+    );
+    const body = String(adapter.addComment.mock.calls[0][1]);
+    expect(body).toContain("** ターン #1"); // 行頭 *（レベル数）
+    expect(body).toContain(`[[a.ts(1)>https://github.com/o/r/blob/${HEAD}/a.ts]]`); // [[text>url]]
   });
 });

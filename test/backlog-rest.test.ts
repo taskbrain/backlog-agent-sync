@@ -98,3 +98,99 @@ describe("BacklogRest", () => {
     expect(priorities[1].name).toBe("中");
   });
 });
+
+describe("BacklogRest（G19: フィールド/Backlog Git）", () => {
+  function restWith(fetchMock: ReturnType<typeof vi.fn>) {
+    return new BacklogRest(cfg, { fetch: fetchMock, rateLimiter: { beforeRequest: async () => {}, handle429: async () => {} } as any });
+  }
+
+  it("getCategories / getVersions は project 配下のエンドポイントを呼ぶ", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonRes([{ id: 101, name: "フロントエンド" }]))
+      .mockResolvedValueOnce(jsonRes([{ id: 201, name: "v1.0", startDate: "2026-06-01", releaseDueDate: "2026-06-30", archived: false }]));
+    const rest = restWith(fetchMock);
+    const cats = await rest.getCategories("PROJ");
+    const vers = await rest.getVersions("PROJ");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v2/projects/PROJ/categories");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/api/v2/projects/PROJ/versions");
+    expect(cats[0]).toEqual({ id: 101, name: "フロントエンド" });
+    expect(vers[0].releaseDueDate).toBe("2026-06-30");
+  });
+
+  it("getResolutions は id:0（対応済み）をそのまま返す", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes([{ id: 0, name: "対応済み" }, { id: 1, name: "対応しない" }]));
+    const rest = restWith(fetchMock);
+    const resolutions = await rest.getResolutions();
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v2/resolutions");
+    expect(resolutions[0].id).toBe(0);
+    expect(resolutions[0].name).toBe("対応済み");
+  });
+
+  it("getProjectInfo は textFormattingRule を返す", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 77, projectKey: "PROJ", name: "P", textFormattingRule: "markdown" }));
+    const rest = restWith(fetchMock);
+    const info = await rest.getProjectInfo("PROJ");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v2/projects/PROJ");
+    expect(info).toEqual({ id: 77, textFormattingRule: "markdown" });
+  });
+
+  it("getGitRepositories は id/name/httpUrl を返す", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes([
+      { id: 9, name: "app", httpUrl: "https://ex.backlog.com/git/PROJ/app.git", sshUrl: "x" },
+    ]));
+    const rest = restWith(fetchMock);
+    const repos = await rest.getGitRepositories("PROJ");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v2/projects/PROJ/git/repositories");
+    expect(repos).toEqual([{ id: 9, name: "app", httpUrl: "https://ex.backlog.com/git/PROJ/app.git" }]);
+  });
+
+  it("getGitPullRequests は statusId[] を反復付与し issue を整形して返す", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes([
+      { id: 50, number: 3, summary: "PR title", branch: "feature/x", base: "main", issue: { id: 700, issueKey: "PROJ-7" } },
+      { id: 51, number: 4, summary: "no issue", branch: "fix/y", base: "main", issue: null },
+    ]));
+    const rest = restWith(fetchMock);
+    const prs = await rest.getGitPullRequests("PROJ", "app", { statusId: [1, 2] });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("/api/v2/projects/PROJ/git/repositories/app/pullRequests");
+    expect(url).toContain("statusId%5B%5D=1");
+    expect(url).toContain("statusId%5B%5D=2");
+    expect(prs[0].issue).toEqual({ id: 700, issueKey: "PROJ-7" });
+    expect(prs[1].issue).toBeUndefined();
+  });
+
+  it("updateGitPullRequest は PATCH /pullRequests/:number に issueId/comment を送る", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 50 }));
+    const rest = restWith(fetchMock);
+    await rest.updateGitPullRequest("PROJ", "app", 3, { issueId: 700, comment: "関連付け" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/projects/PROJ/git/repositories/app/pullRequests/3");
+    expect((init as RequestInit).method).toBe("PATCH");
+    const body = String((init as RequestInit).body);
+    expect(body).toContain("issueId=700");
+    expect(body).toContain(`comment=${encodeURIComponent("関連付け")}`);
+  });
+
+  it("createIssue は categoryId/milestoneId 配列を categoryId[] 形式で反復送信する", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 1, issueKey: "PROJ-1" }));
+    const rest = restWith(fetchMock);
+    await rest.createIssue({
+      projectId: 10, summary: "s", issueTypeId: 1, priorityId: 3,
+      assigneeId: 5, categoryId: [101, 102], milestoneId: [201],
+    });
+    const body = String((fetchMock.mock.calls[0][1] as RequestInit).body);
+    expect(body).toContain("assigneeId=5");
+    expect(body).toContain("categoryId%5B%5D=101");
+    expect(body).toContain("categoryId%5B%5D=102");
+    expect(body).toContain("milestoneId%5B%5D=201");
+  });
+
+  it("updateIssue は resolutionId=0 を欠落させずに送る", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({}));
+    const rest = restWith(fetchMock);
+    await rest.updateIssue({ issueIdOrKey: "PROJ-1", statusId: 3, resolutionId: 0 });
+    const body = String((fetchMock.mock.calls[0][1] as RequestInit).body);
+    expect(body).toContain("statusId=3");
+    expect(body).toContain("resolutionId=0");
+  });
+});
