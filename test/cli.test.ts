@@ -39,6 +39,15 @@ describe("parseArgs", () => {
     expect(parseArgs(["init", "--vcs", "bogus"])).toEqual({ cmd: "init" });
     expect(parseArgs(["init", "--vcs"])).toEqual({ cmd: "init" });
   });
+  it("docs を解釈する（--dry-run/--prune/--recreate/--target）", () => {
+    expect(parseArgs(["docs"])).toEqual({ cmd: "docs", dryRun: false, prune: false, recreate: false });
+    expect(parseArgs(["docs", "--dry-run", "--prune", "--recreate", "--target", "documents"]))
+      .toEqual({ cmd: "docs", dryRun: true, prune: true, recreate: true, target: "documents" });
+    expect(parseArgs(["docs", "--target", "wiki"])).toEqual({ cmd: "docs", dryRun: false, prune: false, recreate: false, target: "wiki" });
+  });
+  it("docs --target の不正値は無視する（既定 wiki のまま）", () => {
+    expect(parseArgs(["docs", "--target", "bogus"])).toEqual({ cmd: "docs", dryRun: false, prune: false, recreate: false });
+  });
 });
 
 describe("hook 再帰ガード", () => {

@@ -208,6 +208,38 @@ Claude Code ではスラッシュコマンド `/backlog-sync-init` `/backlog-syn
 - 80 字未満の単文プロンプトは LLM を呼ばず原文をそのまま使います。`claude` CLI が無い環境・タイムアウト時も自動で原文フォールバックします（Codex セッションでは呼びません）。
 - 無効化する場合は `fieldRules.summarize: "off"`。
 
+## ドキュメント同期（docs → Backlog Wiki/Document）
+
+**人間向けのドキュメントは Backlog、コードと一緒に育てる原本はリポジトリ**という分業のため、リポジトリの `docs/` 配下の Markdown を Backlog へ push 同期します（完全同期ではなく「ドキュメント更新後に手動実行」が前提。Claude Code では `/backlog-sync-docs`）。
+
+```bash
+backlog-sync docs --dry-run   # preview（create/update/skip と警告。書込なし）
+backlog-sync docs             # 適用
+```
+
+- **主経路は Wiki**（`--target wiki` 既定）: Backlog Document には**更新 API が存在しない**ため、繰り返し同期できるのは Wiki だけです。ページ名は `docs/` からの相対パス（`/` 区切りで Wiki 上はツリー表示）。
+- **変換**: 相対 `.md` リンクは `[[ページ名]]` の Wiki リンクへ、docs 外のリポジトリ内ファイル・画像は VCS 設定（G19）があれば **HEAD SHA の GitHub permalink** へ書き換えます。フェンスコードブロック内は不変換。
+- **差分同期**: 変換後内容の sha256 を台帳 `.claude/backlog-agent-sync/docs-ledger.json` に記録し、変化が無いページは API を呼ばずスキップ（再実行は全スキップ＝冪等）。
+- **`--prune`（opt-in）**: ローカルから消えたページをリモートからも削除します。ただし**台帳が管理しているページのみ**が対象で、台帳管理外のリモートページには決して触れません。
+- **`--target documents`**: ワンショット投入用。フォルダ階層は親ドキュメントで再現します。更新 API が無いため、変更があるページは警告のみ表示し、`--recreate` を付けた場合に限り**削除→再作成（URL が変わります）**で反映します。削除には管理者権限が必要です。
+- **Home は不可侵**: Backlog Wiki の Home はユーザーの手書きページとして、いかなる場合も書き込み・削除しません。概要ページは `docsSync.overviewPage`（既定「プロジェクト概要」）という**別ページ**として作成され、`overviewSource`（既定 README.md）の変換結果 + 同期ページの「## ドキュメント一覧」（[[リンク]] の階層箇条書き）が載ります。
+- 通知スパム防止のため Wiki の作成/更新/削除はすべて `mailNotify=false` で送信します。
+
+設定（`project.json` の `docsSync`。無ければ既定値で動作）:
+
+```jsonc
+"docsSync": {
+  "target": "wiki",                       // "wiki"（既定・更新可能）| "documents"（ワンショット投入）
+  "root": "docs",                         // 同期ルート
+  "overviewSource": "README.md",          // 概要ページの元（リポジトリルート相対）
+  "overviewPage": "プロジェクト概要",        // 概要の Wiki ページ名（Home は指定不可）
+  "exclude": ["assets/", "superpowers/research/"],  // root 相対・前方一致
+  "maxFileKb": 100                        // 超過は警告スキップ
+}
+```
+
+> 注: Document の tree API は結果整合のため、作成直後の親子関係が即時には反映されないことがあります（実機観察）。閲覧 UI 側で確認してください。
+
 ## コマンドリファレンス
 
 ```
@@ -216,6 +248,8 @@ backlog-sync init [--vcs github|backlog|generic]
                                            # / VCS 自動検出（--vcs で上書き）/ project.json 書込
 backlog-sync seed [--plan <file>] [--dry-run]
                                            # 現状の初回同期（plan は stdin でも可。dry-run はプレビューのみ）
+backlog-sync docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]
+                                           # docs/ → Backlog Wiki/Document 同期（台帳差分・冪等）
 backlog-sync hook <event>                  # フック用（stdin=イベントJSON）
                                            #   event: session-start | user-prompt-submit | post-tool | subagent-stop | stop | session-end
 backlog-sync pull [--session <id>]         # 担当課題・新着コメントの差分取得（--session 指定でカーソル保存）
@@ -256,6 +290,7 @@ BACKLOG_SYNC_ROOT > CLAUDE_PROJECT_DIR > イベントの cwd
 | `.claude/state/<session_id>.json` | セッション⇄課題の対応・活動バッファ・オフラインキュー・pull カーソル |
 | `.claude/backlog-agent-sync/project.json` | `init` が解決した statusMap / 課題種別 / 優先度 / カテゴリ / バージョン / 完了理由 / vcs / fieldRules |
 | `.claude/backlog-agent-sync/seed-ledger.json` | seed の slug→課題キー台帳 |
+| `.claude/backlog-agent-sync/docs-ledger.json` | docs 同期の relPath→{wikiId/documentId, hash} 台帳 |
 
 `.gitignore` への追加を推奨します:
 
