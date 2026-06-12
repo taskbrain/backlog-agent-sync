@@ -7,6 +7,8 @@ export interface TrackerAdapter {
   /** resolutionId は 0 もあり得る（「対応済み」）。呼出側は != null で有無を判定する。 */
   setStatus(issueIdOrKey: string | number, statusId: number, comment?: string, resolutionId?: number): Promise<void>;
   addComment(issueIdOrKey: string | number, content: string): Promise<void>;
+  /** 説明文のみの更新（依頼内容の v3 PATCH 用）。 */
+  updateDescription(issueIdOrKey: string | number, description: string): Promise<void>;
   /** マーカー検索。status は現在のステータス名（取得できる実装のみ・optional） */
   findByMarker(marker: string): Promise<FoundIssue | undefined>;
 }

@@ -50,6 +50,8 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
+    // 再帰ガード: summarize の `claude -p` 子プロセスが発火させたフックは即終了（無限再帰防止）
+    if (process.env.BACKLOG_SYNC_IN_HOOK) return;
     const raw = await readStdin();
     const ev = normalizeAuto(parsed.event, raw);
     if (!ev || !ev.sessionId) return; // 識別子が無ければ無視（非ブロッキング）

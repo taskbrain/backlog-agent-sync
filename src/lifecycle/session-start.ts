@@ -21,6 +21,8 @@ export interface LifecycleDeps {
   resolutionFixedId?: number; // 完了理由。0 もあり得るため != null で判定すること
   root?: string; // buildRuntime の実行ルート（turnStartHead / git 認識用。無ければ ev.cwd）
   git?: GitOps; // git 操作の DI（テスト用。無ければ実 git）
+  // G20: 依頼プロンプトの LLM 整理（summarize.ts を束縛して注入。Claude セッションのみ呼ぶ判定は lifecycle 側）
+  summarize?: (prompt: string) => Promise<string | undefined>;
 }
 
 export interface HookOutput { additionalContext?: string; }
@@ -70,11 +72,21 @@ function buildOverview(prompt: string): string {
   return para.length > OVERVIEW_MAX ? `${para.slice(0, OVERVIEW_MAX)}…` : para;
 }
 
-/** 説明 v2（設計4.1）: ## 概要 / ## 依頼(原文) 4000字 / ## 環境 + 機械マーカー。 */
+/** ## 環境 のリスト行（説明 v2/v3 で共用）。 */
+function envLines(ev: CanonicalEvent, deps: LifecycleDeps, md: ReturnType<typeof renderer>, branch?: string): string[] {
+  const model = typeof (ev.raw as any)?.model === "string" && (ev.raw as any).model !== "" ? ` (${(ev.raw as any).model})` : "";
+  const out: string[] = [md.listItem(`エージェント: ${ev.tool}${model}`)];
+  const repo = deps.vcs ? repoUrl(deps.vcs) : undefined;
+  if (repo) out.push(md.listItem(`リポジトリ: ${repo}`));
+  out.push(md.listItem(`ブランチ: ${branch ?? "-"} / 作業ディレクトリ: ${ev.cwd}`));
+  out.push(md.listItem(`開始: ${new Date().toISOString()} / session_id: ${ev.sessionId}`));
+  return out;
+}
+
+/** 説明 v2（作成時の即時説明）: ## 概要 / ## 依頼(原文) 4000字 / ## 環境 + 機械マーカー。 */
 function buildIssueDescription(ev: CanonicalEvent, st: SessionState, deps: LifecycleDeps, branch?: string): string {
   const md = renderer(deps.textFormattingRule ?? "markdown");
   const prompt = (st.initialPrompt ?? ev.prompt ?? "").trim();
-  const model = typeof (ev.raw as any)?.model === "string" && (ev.raw as any).model !== "" ? ` (${(ev.raw as any).model})` : "";
   const lines: string[] = [];
   lines.push(md.heading(2, "概要"));
   lines.push(buildOverview(prompt) || "自動生成: backlog-agent-sync");
@@ -85,13 +97,31 @@ function buildIssueDescription(ev: CanonicalEvent, st: SessionState, deps: Lifec
     lines.push("");
   }
   lines.push(md.heading(2, "環境"));
-  lines.push(md.listItem(`エージェント: ${ev.tool}${model}`));
-  const repo = deps.vcs ? repoUrl(deps.vcs) : undefined;
-  if (repo) lines.push(md.listItem(`リポジトリ: ${repo}`));
-  lines.push(md.listItem(`ブランチ: ${branch ?? "-"} / 作業ディレクトリ: ${ev.cwd}`));
-  lines.push(md.listItem(`開始: ${new Date().toISOString()} / session_id: ${ev.sessionId}`));
+  lines.push(...envLines(ev, deps, md, branch));
   lines.push(sessionMarker(ev.sessionId));
   return lines.join("\n");
+}
+
+/**
+ * 説明 v3（G20）: LLM 整理に成功したときの PATCH 用。
+ * まとめ直した依頼文を主役にし、原文は「元プロンプト」として末尾の別枠へ。
+ * 環境とマーカーは必ず維持する。
+ */
+export async function buildDescriptionV3(ev: CanonicalEvent, deps: LifecycleDeps, prompt: string, summary: string): Promise<string> {
+  const md = renderer(deps.textFormattingRule ?? "markdown");
+  const git = deps.git ?? defaultGitOps;
+  const branch = await git.branchName(deps.root ?? ev.cwd);
+  return [
+    md.heading(2, "依頼内容"),
+    summary,
+    "",
+    md.heading(2, "環境"),
+    ...envLines(ev, deps, md, branch),
+    "",
+    md.heading(2, "元プロンプト"),
+    prompt.trim().slice(0, DESCRIPTION_PROMPT_MAX),
+    sessionMarker(ev.sessionId),
+  ].join("\n");
 }
 
 /** deps.fields による動的フィールド解決（失敗 / 未注入は空 = 従来挙動）。undefined 値のキーは除去。 */
@@ -137,7 +167,8 @@ export async function ensureSessionIssue(ev: CanonicalEvent, deps: LifecycleDeps
   await deps.store.withLock(ev.sessionId, (s) => {
     s.issueKey = ref.issueKey; s.issueId = ref.id; s.statusMap = st.statusMap; s.lastStatus = "in_progress";
   });
-  await deps.adapter.setStatus(ref.issueKey, st.statusMap.in_progress, "作業を開始しました（backlog-agent-sync）");
+  // 「作業を開始しました」コメントは投稿しない（G20: 説明と処理中ステータスで十分・ノイズ削減）
+  await deps.adapter.setStatus(ref.issueKey, st.statusMap.in_progress, undefined);
   st.issueKey = ref.issueKey; st.issueId = ref.id; // 呼出元のスナップショットにも反映
   return ref.issueKey;
 }

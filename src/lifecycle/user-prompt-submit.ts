@@ -1,12 +1,10 @@
 import type { CanonicalEvent } from "../types.js";
-import { ensureSessionIssue, opDrainHandler, type LifecycleDeps, type HookOutput } from "./session-start.js";
+import { ensureSessionIssue, buildDescriptionV3, opDrainHandler, type LifecycleDeps, type HookOutput } from "./session-start.js";
 import { defaultGitOps } from "../vcs/git.js";
 
-const PROMPT_DETAIL_MAX = 120;
-
 /**
- * UserPromptSubmit: 初回プロンプトで課題を作成（タイトル/説明はプロンプト由来）。
- * 2ターン目以降は追加依頼としてバッファに記録し、状態を処理中へ戻す。
+ * UserPromptSubmit: 初回プロンプトで課題を作成し、LLM 整理に成功したら説明を v3 へ更新。
+ * 2ターン目以降は依頼の整理結果を lastPromptSummary に保存し、状態を処理中へ戻す。
  * 失敗は握りつぶしプロンプト処理を止めない（非ブロッキング原則）。
  */
 export async function runUserPromptSubmit(ev: CanonicalEvent, deps: LifecycleDeps): Promise<HookOutput> {
@@ -31,22 +29,35 @@ export async function runUserPromptSubmit(ev: CanonicalEvent, deps: LifecycleDep
     st.turnStartHead = head;
   }
 
+  // 依頼の LLM 整理（Claude セッションのみ。Codex 環境は claude CLI 不在 + フック同期30秒制約のため呼ばない）
+  let summary: string | undefined;
+  if (prompt && deps.summarize && ev.tool === "claude") {
+    try {
+      summary = await deps.summarize(prompt);
+    } catch {
+      summary = undefined; // 整理失敗は原文フォールバック
+    }
+  }
+  if (prompt) {
+    // 前ターンの残骸を上書き（undefined なら明示的にクリア = stop が原文へフォールバック）
+    await store.withLock(ev.sessionId, (s) => { s.lastPromptSummary = summary; });
+    st.lastPromptSummary = summary;
+  }
+
   try {
     if (!st.issueKey) {
-      // 初回プロンプト: ここで課題を作成（init 未解決時は undefined で no-op）
-      await ensureSessionIssue(ev, deps, st);
+      // 初回プロンプト: 課題を即時作成（原文ベースの説明。init 未解決時は undefined で no-op）
+      const issueKey = await ensureSessionIssue(ev, deps, st);
+      // LLM 整理に成功していれば、説明を v3（まとめ直し主役 + 元プロンプト別枠）へ更新。
+      // 失敗時は従来説明のまま（PATCH しない）。マーカーと環境は buildDescriptionV3 が維持する
+      if (issueKey && prompt && summary) {
+        await deps.adapter.updateDescription(issueKey, await buildDescriptionV3(ev, deps, prompt, summary));
+      }
       return {};
     }
 
-    // 2ターン目以降: 追加依頼として記録
-    if (prompt) {
-      await store.withLock(ev.sessionId, (s) => {
-        s.activityBuffer.push({ ts: new Date().toISOString(), tool: "(依頼)", summary: "(依頼)", detail: prompt.slice(0, PROMPT_DETAIL_MAX) });
-      });
-    }
-
-    // 応答済（resolved）→ 再依頼で処理中へフリップ。同値ステータス PATCH は Backlog が
-    // code 7 で拒否するため、lastStatus が既に in_progress ならスキップする
+    // 2ターン目以降: 応答済（resolved）→ 再依頼で処理中へフリップ。同値ステータス PATCH は
+    // Backlog が code 7 で拒否するため、lastStatus が既に in_progress ならスキップする
     if (st.lastStatus !== "in_progress") {
       const issueKey = st.issueKey;
       const turn = st.turnCount ?? 0;
@@ -55,7 +66,7 @@ export async function runUserPromptSubmit(ev: CanonicalEvent, deps: LifecycleDep
       await store.drain(ev.sessionId, opDrainHandler(deps.adapter, issueKey));
     }
   } catch {
-    // 非ブロッキング: 課題作成・状態遷移の失敗でプロンプト処理を止めない
+    // 非ブロッキング: 課題作成・説明更新・状態遷移の失敗でプロンプト処理を止めない
   }
   return {};
 }

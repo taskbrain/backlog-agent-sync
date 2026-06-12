@@ -56,6 +56,7 @@ export interface SessionState {
   lastStatus?: string;
   initialPrompt?: string; // 初回プロンプト（課題タイトル/説明の素材）
   lastPrompt?: string; // このターンのプロンプト（stop で消費・クリア）
+  lastPromptSummary?: string; // このターンのプロンプトの LLM 整理（stop の ### 依頼 で消費・クリア）
   turnCount?: number; // ターン要約の連番
   turnStartHead?: string; // ターン開始時の HEAD SHA（stop のコミット列挙に使用）
 }
@@ -95,7 +96,7 @@ export interface FieldRules {
   milestone?: string; // "current" | "<name>" | "off"
   affectedVersion?: string; // "<name>" | "off"
   resolutionOnResolve?: boolean;
-  summarize?: "off" | "claude"; // LLM要約のopt-in（既定off。"claude"はANTHROPIC_API_KEY必須・クレジット消費）
+  summarize?: "off" | "claude"; // 依頼文の LLM 整理（既定 "claude" = サブスク認証の claude CLI で haiku 1呼出/ターン。"off" で無効）
 }
 
 /** project.json 全体（init が書くキャッシュ）。すべて optional = 旧ファイル後方互換。 */

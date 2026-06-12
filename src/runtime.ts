@@ -6,6 +6,7 @@ import { BacklogAdapter } from "./tracker/backlog-adapter.js";
 import type { LifecycleDeps } from "./lifecycle/session-start.js";
 import type { ProjectCache } from "./types.js";
 import { resolveCreateFields } from "./fields.js";
+import { summarizeRequest } from "./summarize.js";
 
 export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; rest: BacklogRest; projectKey: string }> {
   const cfg = resolveConfig(process.env);
@@ -20,6 +21,7 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
   let textFormattingRule: LifecycleDeps["textFormattingRule"];
   let resolutionFixedId: number | undefined;
   let fields: LifecycleDeps["fields"];
+  let summarize: LifecycleDeps["summarize"];
   try {
     const raw = await readFile(projectConfigPath(cwd), "utf8");
     const pj = JSON.parse(raw) as ProjectCache;
@@ -30,9 +32,11 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
     if (pj.textFormattingRule === "markdown" || pj.textFormattingRule === "backlog") textFormattingRule = pj.textFormattingRule;
     if (pj.resolutionFixedId != null) resolutionFixedId = Number(pj.resolutionFixedId); // 0（対応済み）も有効
     fields = (prompt) => resolveCreateFields(prompt, pj);
+    // 依頼の LLM 整理は既定 ON（"off" で無効化）。Codex セッションで呼ばない判定は lifecycle 側（ev.tool）
+    if (pj.fieldRules?.summarize !== "off") summarize = (prompt) => summarizeRequest(prompt);
   } catch {
     // project.json 未作成: env または未解決にフォールバック
   }
-  const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest, vcs, textFormattingRule, resolutionFixedId, root: cwd, fields };
+  const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest, vcs, textFormattingRule, resolutionFixedId, root: cwd, fields, summarize };
   return { deps, rest, projectKey: cfg.projectKey };
 }

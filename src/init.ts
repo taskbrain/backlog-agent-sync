@@ -40,7 +40,7 @@ export interface InitResult {
   warnings: string[];
 }
 
-const DEFAULT_FIELD_RULES: FieldRules = { assignSelf: true, resolutionOnResolve: true, milestone: "off", summarize: "off" };
+const DEFAULT_FIELD_RULES: FieldRules = { assignSelf: true, resolutionOnResolve: true, milestone: "off", summarize: "claude" };
 
 /** 「タスク」(または task) を優先、無ければ先頭。 */
 function pickDefaultIssueType(types: IssueTypeDef[]): number | undefined {
