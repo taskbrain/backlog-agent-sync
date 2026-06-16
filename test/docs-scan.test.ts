@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scanDocs } from "../src/docs/scan.js";
@@ -67,5 +67,49 @@ describe("scanDocs", () => {
     const res = await scanDocs(dir, { overviewSource: "MISSING.md" });
     expect(res.overview).toBeUndefined();
     expect(res.warnings.some((w) => w.includes("MISSING.md"))).toBe(true);
+  });
+
+  it("同名ページ名の衝突は (2)(3)… の連番識別子で解消する（S-1）", async () => {
+    write("docs/sec/a.md", "# 重複");
+    write("docs/sec/b.md", "# 重複");
+    write("docs/sec/c.md", "# 重複");
+    write("README.md", "# r");
+    const cfg = { naming: { fileSource: "h1" as const, numberPrefix: "none" as const, dirNames: { sec: "セクション" } } };
+    const res = await scanDocs(dir, cfg);
+    // 走査順 a,b,c。先頭は素の名、後続は (2)(3) を付与
+    const byRel = new Map(res.docs.map((d) => [d.relPath, d.pageName]));
+    expect(byRel.get("sec/a.md")).toBe("セクション/重複");
+    expect(byRel.get("sec/b.md")).toBe("セクション/重複 (2)");
+    expect(byRel.get("sec/c.md")).toBe("セクション/重複 (3)");
+    expect(res.warnings.some((w) => w.includes("ページ名が衝突"))).toBe(true);
+  });
+
+  it("stableKeys のメンバーは衝突時に素の名前を保持し、新規ファイルが連番を受ける（S-2）", async () => {
+    write("docs/sec/a.md", "# 重複"); // 走査順で先（localeCompare）。stableKeys に含まれない新規ファイル
+    write("docs/sec/z.md", "# 重複"); // 走査順で後だが既存（stableKeys メンバー）
+    write("README.md", "# r");
+    const cfg = { naming: { fileSource: "h1" as const, numberPrefix: "none" as const, dirNames: { sec: "セクション" } } };
+    const res = await scanDocs(dir, cfg, new Set(["sec/z.md"]));
+    const byRel = new Map(res.docs.map((d) => [d.relPath, d.pageName]));
+    // 走査順では a が先だが、安定キー z が素の名前を確保する（スキャン順を上書き）
+    expect(byRel.get("sec/z.md")).toBe("セクション/重複");
+    expect(byRel.get("sec/a.md")).toBe("セクション/重複 (2)");
+  });
+
+  // root 実行ではパーミッションビットが無視され読み取りが成功してしまうため、その場合のみスキップ
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  it.skipIf(isRoot)("本文の読み取りに失敗したファイルは理由つきでスキップし、走査は継続する", async () => {
+    write("docs/ok.md", "# ok");
+    write("docs/locked.md", "# secret");
+    write("README.md", "# r");
+    chmodSync(join(dir, "docs/locked.md"), 0o000); // 読み取り不可にする
+    try {
+      const res = await scanDocs(dir, {});
+      // 読めるファイルは同期対象に残る（走査は中断しない）
+      expect(res.docs.map((d) => d.relPath)).toEqual(["ok.md"]);
+      expect(res.skipped).toContainEqual({ relPath: "locked.md", reason: "読み取り不可" });
+    } finally {
+      chmodSync(join(dir, "docs/locked.md"), 0o644); // afterEach の rm のため権限を戻す
+    }
   });
 });

@@ -99,6 +99,17 @@ export interface FieldRules {
   summarize?: "off" | "claude"; // 依頼文の LLM 整理（既定 "claude" = サブスク認証の claude CLI で haiku 1呼出/ターン。"off" で無効）
 }
 
+/**
+ * project.json `docsSync.naming`（Wiki ページ名の組み立て規則。案C: 大分類のみ番号）。
+ * 後方互換: fileSource 未指定/"filename" かつ numberPrefix 未指定/"none" は旧挙動（relPath そのまま）。
+ */
+export interface DocsNamingConfig {
+  fileSource?: "h1" | "filename"; // ファイル名の素材（既定 "filename" = 後方互換）
+  numberPrefix?: "dir" | "all" | "none"; // 番号プレフィクスの付与範囲（既定 "none" = 後方互換）
+  dirNames?: Record<string, string>; // docs ルート相対ディレクトリパス → 日本語表示名（番号は含めない）
+  stripTitleSuffix?: string[]; // H1 由来タイトル末尾の共通サフィックスを除去。複数該当は最長一致。除去後が空になる場合は除去しない
+}
+
 /** project.json `docsSync`（docs → Backlog Wiki/Document 同期の設定。G21）。 */
 export interface DocsSyncConfig {
   target?: "wiki" | "documents"; // 既定 "wiki"（更新可能）。documents はワンショット投入（更新 API 不在）
@@ -107,6 +118,7 @@ export interface DocsSyncConfig {
   overviewPage?: string; // 概要の Wiki ページ名（既定 "プロジェクト概要"。Home は不可侵のため指定不可）
   exclude?: string[]; // root 相対の前方一致で除外
   maxFileKb?: number; // 超過は警告スキップ（既定 100）
+  naming?: DocsNamingConfig; // ページ名の組み立て規則（未指定は旧挙動 = relPath の .md 除去）
 }
 
 /** project.json 全体（init が書くキャッシュ）。すべて optional = 旧ファイル後方互換。 */

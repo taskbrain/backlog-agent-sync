@@ -75,13 +75,29 @@ export async function runDocsSync(opts: DocsSyncOptions, deps: DocsSyncDeps): Pr
   const target = opts.target ?? cfg.target ?? "wiki";
   const docsRootRel = (cfg.root ?? DEFAULT_DOCS_ROOT).replace(/\/+$/, "");
 
+  // ガード: naming によるリネームは documents backend では原理的に不可（更新 API が無い）。
+  // 書き込みゼロで終了し、wiki への切替か naming 解除を促す。
+  const n = cfg.naming;
+  const namingActive = !!n && (
+    n.fileSource === "h1" ||
+    (n.numberPrefix != null && n.numberPrefix !== "none") ||
+    (n.dirNames != null && Object.keys(n.dirNames).length > 0)
+  );
+  if (namingActive && target === "documents") {
+    res.warnings.push("naming によるリネームは documents backend では未対応です（更新 API が無く原理的にリネーム不可）。target: \"wiki\" を使うか naming を外してください。");
+    return res; // 書き込みゼロで終了
+  }
+
   // プリフライト: 記法。markdown 以外なら警告し、変換 rule を切り替える
   const rule: "markdown" | "backlog" = deps.textFormattingRule === "backlog" ? "backlog" : "markdown";
   if (deps.textFormattingRule && deps.textFormattingRule !== "markdown") {
     res.warnings.push(`プロジェクトの記法が markdown ではありません（${deps.textFormattingRule}）。リンクを ${deps.textFormattingRule} 記法で生成します。`);
   }
 
-  const scan = await scanDocs(opts.repoRoot, cfg);
+  // 台帳をスキャン前に読み、既存ページ名を安定キーとして渡す（衝突時に既存名を保持・新規へ連番）。
+  // 台帳キー（overview:: / dir:: 接頭辞付き）は docs 相対 relPath と一致し得ないため安全。
+  const ledger = await deps.loadLedger();
+  const scan = await scanDocs(opts.repoRoot, cfg, new Set(Object.keys(ledger.pages)));
   res.warnings.push(...scan.warnings);
   for (const s of scan.skipped) {
     res.skipped++;
@@ -89,7 +105,6 @@ export async function runDocsSync(opts: DocsSyncOptions, deps: DocsSyncDeps): Pr
     res.warnings.push(`スキップ: ${s.relPath}（${s.reason}）`);
   }
 
-  const ledger = await deps.loadLedger();
   const git = deps.git ?? defaultGitOps;
   const headSha = await git.headSha(opts.repoRoot);
   const read = deps.readFile ?? ((p: string) => readFile(p, "utf8"));
@@ -142,7 +157,8 @@ async function syncWiki(opts: DocsSyncOptions, deps: DocsSyncDeps, res: SyncResu
       continue;
     }
     const entry = ledger.pages[p.ledgerKey];
-    if (entry && entry.hash === p.hash) {
+    // ハッシュ一致でも name が変わっていれば update（リネーム検知）
+    if (entry && entry.hash === p.hash && entry.name === pageName) {
       res.skipped++;
       res.preview.push({ action: "skip", pageName, relPath: p.doc.relPath });
       continue;
