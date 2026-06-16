@@ -173,6 +173,45 @@ describe("runDocsSync（wiki backend）", () => {
     expect(rest.updateWiki).not.toHaveBeenCalledWith(1, expect.anything());
     expect(res.warnings.some((w) => w.includes("Home"))).toBe(true);
   });
+
+  it("ハッシュ一致でも台帳の name と現ページ名が食い違えば update（リネーム検知）", async () => {
+    write("docs/a.md", "# A");
+    write("README.md", "# R");
+    // 1) まず legacy 設定で同期し、a.md の wikiId/hash を採取
+    const seedLedger = memLedger();
+    await runDocsSync({ repoRoot: dir, cfg: {} }, makeDeps(restMock(), seedLedger));
+    const { wikiId, hash } = seedLedger.get().pages["a.md"];
+    const overviewEntry = seedLedger.get().pages["overview::README.md"];
+
+    // 2) name だけを「別名」に書き換えた台帳を用意（content/hash は不変＝リネーム相当）
+    const renamed = memLedger({
+      version: 1,
+      pages: {
+        "a.md": { name: "別名", wikiId, hash },
+        "overview::README.md": JSON.parse(JSON.stringify(overviewEntry)),
+      },
+    });
+    const rest2 = restMock();
+    const res = await runDocsSync({ repoRoot: dir, cfg: {} }, makeDeps(rest2, renamed));
+    // 再計算された legacy ページ名 "a" で update が走る（スキップしない）
+    expect(rest2.updateWiki).toHaveBeenCalledWith(wikiId, expect.objectContaining({ name: "a" }));
+    expect(rest2.addWiki).not.toHaveBeenCalled();
+    expect(res.updated).toBeGreaterThanOrEqual(1);
+    // 台帳の name が現ページ名に更新される
+    expect(renamed.get().pages["a.md"].name).toBe("a");
+  });
+
+  it("台帳の name と hash が両方一致すればスキップする（リネーム検知の対称ケース）", async () => {
+    write("docs/a.md", "# A");
+    write("README.md", "# R");
+    const ledger = memLedger();
+    await runDocsSync({ repoRoot: dir, cfg: {} }, makeDeps(restMock(), ledger));
+    const rest2 = restMock();
+    const res = await runDocsSync({ repoRoot: dir, cfg: {} }, makeDeps(rest2, ledger));
+    expect(rest2.updateWiki).not.toHaveBeenCalled();
+    expect(rest2.addWiki).not.toHaveBeenCalled();
+    expect(res.skipped).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("runDocsSync（documents backend）", () => {
@@ -213,5 +252,31 @@ describe("runDocsSync（documents backend）", () => {
     expect(res3.updated).toBe(1);
     expect(ledger.get().pages["a.md"].documentId).toBe("d-a"); // モックは同 id を返すが台帳が更新されている
     expect(ledger.get().pages["a.md"].hash).toBeTypeOf("string");
+  });
+
+  it("naming が有効なら documents backend は書き込みゼロで警告終了する（リネーム不可のためガード）", async () => {
+    write("docs/a.md", "# A");
+    write("README.md", "# R");
+    const rest = restMock();
+    const ledger = memLedger();
+    const res = await runDocsSync(
+      { repoRoot: dir, cfg: { naming: { fileSource: "h1" } }, target: "documents" },
+      makeDeps(rest, ledger),
+    );
+    expect(rest.addDocument).not.toHaveBeenCalled();
+    expect(rest.deleteDocument).not.toHaveBeenCalled();
+    expect(res.created).toBe(0);
+    expect(res.updated).toBe(0);
+    expect(res.warnings.some((w) => w.includes("documents"))).toBe(true);
+  });
+
+  it("naming が無効なら documents backend は通常どおり書き込む（ガードの否定ケース）", async () => {
+    write("docs/a.md", "# A");
+    write("README.md", "# R");
+    const rest = restMock();
+    const ledger = memLedger();
+    const res = await runDocsSync({ repoRoot: dir, cfg: {}, target: "documents" }, makeDeps(rest, ledger));
+    expect(rest.addDocument).toHaveBeenCalled();
+    expect(res.created).toBeGreaterThan(0);
   });
 });
