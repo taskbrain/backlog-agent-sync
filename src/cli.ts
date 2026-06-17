@@ -54,6 +54,26 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return { cmd };
 }
 
+// APIキー混入警告は 1 プロセス 1 回に抑制する（フック/CLI が複数回 main を呼んでも重複させない）。
+let apiKeyWarned = false;
+
+/** テスト用: 1回抑制フラグをリセットする。 */
+export function __resetApiKeyWarning(): void {
+  apiKeyWarned = false;
+}
+
+/**
+ * ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN が環境に存在する場合、judgment が API 従量課金を
+ * 回避するため決定論へフォールバックする旨を 1 回だけ警告する（告知のみ・ガードは judgment 側で実装済み）。
+ */
+export function warnIfApiKeyPresent(write: (s: string) => void = (s) => process.stderr.write(s)): void {
+  if (apiKeyWarned) return;
+  const hit = process.env.ANTHROPIC_API_KEY ? "ANTHROPIC_API_KEY" : process.env.ANTHROPIC_AUTH_TOKEN ? "ANTHROPIC_AUTH_TOKEN" : undefined;
+  if (!hit) return;
+  apiKeyWarned = true;
+  write(`backlog-sync: ${hit} が設定されています。claude -p がサブスクではなく API 従量課金になる恐れがあるため、判定は API 課金回避のため決定論にフォールバックします。\n`);
+}
+
 function emit(out: { additionalContext?: string }): void {
   if (out.additionalContext) {
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: out.additionalContext } }) + "\n");
@@ -62,6 +82,8 @@ function emit(out: { additionalContext?: string }): void {
 
 export async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
+  // APIキー混入の告知（1回）。再帰起動された claude -p 子プロセス（BACKLOG_SYNC_IN_HOOK=1）では出さない。
+  if (!process.env.BACKLOG_SYNC_IN_HOOK) warnIfApiKeyPresent();
   if (parsed.cmd === "help") {
     process.stdout.write("backlog-sync <init [--vcs github|backlog|generic]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
     return;

@@ -3,11 +3,29 @@ import { dirname } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { projectConfigPath } from "./config.js";
-import type { FieldRules, VcsConfig } from "./types.js";
+import type { FieldRules, JudgmentConfig, VcsConfig } from "./types.js";
 import type { TrackerAdapter } from "./tracker/adapter.js";
 import type { BacklogRest, IssueTypeDef, PriorityDef } from "./tracker/backlog-rest.js";
 
 export type ExecFileFn = (cmd: string, args: string[], opts: { cwd: string; timeout?: number }) => Promise<{ stdout: string }>;
+
+/**
+ * 判定モデルの選択肢（init 対話の1問）。
+ * - "default": claude 既定モデル（backend=auto）
+ * - "haiku" | "sonnet" | "opus" | "fable": 当該モデルで claude -p（backend=auto）
+ * - "deterministic": LLM 不使用の決定論のみ
+ *
+ * 実機知見: prompt フックでは model="haiku" が OAuth でエラーになるが、
+ * claude -p の --model haiku は別経路で機能する（G20 実績）。よってここでのモデル選択は有効。
+ */
+export type JudgmentChoice = "default" | "haiku" | "sonnet" | "opus" | "fable" | "deterministic";
+
+/** 判定モデル選択 → project.json `judgment` ブロックへ変換する純関数。 */
+export function judgmentFromChoice(choice: JudgmentChoice): JudgmentConfig {
+  if (choice === "deterministic") return { backend: "deterministic" };
+  if (choice === "default") return { backend: "auto" };
+  return { backend: "auto", model: choice };
+}
 
 export interface InitInput {
   cwd: string;
@@ -27,6 +45,11 @@ export interface InitDeps {
   execFile?: ExecFileFn;
   /** remote URL → VcsConfig（テスト注入用。既定はパート A の src/vcs/detect.ts）。 */
   parseRemoteUrl?: (url: string) => VcsConfig;
+  /**
+   * 判定モデル選択の対話（テスト注入用）。
+   * 未指定 = 非対話（既定 backend=auto）。既存 project.json に judgment があれば呼ばれない。
+   */
+  selectJudgment?: () => Promise<JudgmentChoice>;
 }
 export interface InitResult {
   ok: boolean;
@@ -37,6 +60,7 @@ export interface InitResult {
   vcs: VcsConfig;
   textFormattingRule: string;
   resolutionFixedId?: number;
+  judgment: JudgmentConfig;
   warnings: string[];
 }
 
@@ -136,6 +160,12 @@ export async function runInit(input: InitInput, deps: InitDeps): Promise<InitRes
   }
   const fieldRules: FieldRules = (existing.fieldRules as FieldRules | undefined) ?? DEFAULT_FIELD_RULES;
 
+  // judgment は既存設定を尊重（init は上書きしない）。無ければ対話で選択、非対話なら既定 backend=auto。
+  let judgment: JudgmentConfig = (existing.judgment as JudgmentConfig | undefined) ?? { backend: "auto" };
+  if (existing.judgment === undefined && deps.selectJudgment) {
+    judgment = judgmentFromChoice(await deps.selectJudgment());
+  }
+
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify({
     ...existing,
@@ -154,11 +184,12 @@ export async function runInit(input: InitInput, deps: InitDeps): Promise<InitRes
     myselfId: me.id,
     vcs,
     fieldRules,
+    judgment,
     resolvedAt: new Date().toISOString(),
   }, null, 2), "utf8");
 
   return {
     ok: true, me, projectId, defaultIssueTypeId, defaultPriorityId,
-    vcs, textFormattingRule: info.textFormattingRule, resolutionFixedId, warnings,
+    vcs, textFormattingRule: info.textFormattingRule, resolutionFixedId, judgment, warnings,
   };
 }

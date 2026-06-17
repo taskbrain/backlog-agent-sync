@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseArgs, main } from "../src/cli.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { parseArgs, main, warnIfApiKeyPresent, __resetApiKeyWarning } from "../src/cli.js";
 
 describe("parseArgs", () => {
   it("hook session-start を解釈する", () => {
@@ -47,6 +47,54 @@ describe("parseArgs", () => {
   });
   it("docs --target の不正値は無視する（既定 wiki のまま）", () => {
     expect(parseArgs(["docs", "--target", "bogus"])).toEqual({ cmd: "docs", dryRun: false, prune: false, recreate: false });
+  });
+});
+
+describe("warnIfApiKeyPresent（APIキー混入の起動時警告）", () => {
+  const KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = {};
+    for (const k of KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+    __resetApiKeyWarning();
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it("ANTHROPIC_API_KEY があれば1回警告する", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-x";
+    const lines: string[] = [];
+    warnIfApiKeyPresent((s) => lines.push(s));
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("ANTHROPIC_API_KEY");
+    expect(lines[0]).toContain("決定論");
+  });
+
+  it("ANTHROPIC_AUTH_TOKEN があれば1回警告する", () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = "tok";
+    const lines: string[] = [];
+    warnIfApiKeyPresent((s) => lines.push(s));
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("ANTHROPIC_AUTH_TOKEN");
+  });
+
+  it("キー不在なら警告しない", () => {
+    const lines: string[] = [];
+    warnIfApiKeyPresent((s) => lines.push(s));
+    expect(lines).toEqual([]);
+  });
+
+  it("同一プロセスでは2回目以降は警告しない（重複抑制）", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-x";
+    const lines: string[] = [];
+    warnIfApiKeyPresent((s) => lines.push(s));
+    warnIfApiKeyPresent((s) => lines.push(s));
+    warnIfApiKeyPresent((s) => lines.push(s));
+    expect(lines.length).toBe(1);
   });
 });
 
