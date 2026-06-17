@@ -6,6 +6,10 @@ import { StateStore } from "../src/state/store.js";
 import { runPostTool } from "../src/lifecycle/post-tool.js";
 import { runStop } from "../src/lifecycle/stop.js";
 import { runSessionEnd } from "../src/lifecycle/session-end.js";
+import type { JudgmentConfig } from "../src/types.js";
+
+// 決定論 backend を注入して claude 起動を回避する（全テスト共通）。
+const DET: JudgmentConfig = { backend: "deterministic" };
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "bas-")); });
@@ -17,21 +21,133 @@ function adapterWithIssue() {
     createIssue: vi.fn(), findByMarker: vi.fn(),
     addComment: vi.fn().mockResolvedValue(undefined),
     setStatus: vi.fn().mockResolvedValue(undefined),
+    updateDescription: vi.fn().mockResolvedValue(undefined),
   };
 }
 
-describe("runStop", () => {
-  it("バッファを1つの集約コメントにまとめ、状態を resolved にする", async () => {
+// 決定論 backend は turnResult のキーワードで isMilestone を立てる（deterministic.ts MILESTONE_KEYWORDS）。
+const MILESTONE_MSG = "実装完了しました。テストも追加済みです。"; // 「完了」「実装完了」を含む → 節目
+const NON_MILESTONE_MSG = "現在調査を進めています。"; // 節目語なし → 非節目
+
+describe("runStop（説明欄更新 + 節目コメント）", () => {
+  it("非節目ターン: コメントは投稿されず、説明欄だけが毎ターン更新される", async () => {
     const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 }; });
-    await runPostTool({ tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", toolName: "Edit", toolUseId: "a", raw: {} }, { store, adapter: {} as any, projectId: 10 });
-    await runPostTool({ tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", toolName: "Bash", toolUseId: "b", raw: {} }, { store, adapter: {} as any, projectId: 10 });
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.originalTask = "ログイン機能の実装";
+      s.progress = [];
+      s.lastPrompt = "原因を調べて";
+    });
     const adapter = adapterWithIssue();
-    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: adapter as any, projectId: 10 });
-    expect(adapter.addComment).toHaveBeenCalledOnce(); // ツール毎ではなく1回に集約
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
+    // コメントは投稿されない（従来のターン毎 add_comment は撤去）
+    expect(adapter.addComment).not.toHaveBeenCalled();
+    // 説明欄は更新される（毎ターン）。同期先=PROJ-1、4ブロックを含む
+    expect(adapter.updateDescription).toHaveBeenCalledOnce();
+    const [key, body] = adapter.updateDescription.mock.calls[0];
+    expect(key).toBe("PROJ-1");
+    expect(body).toContain("## タスク");
+    expect(body).toContain("ログイン機能の実装");
+    expect(body).toContain("## 進捗");
+    expect(body).toContain("## 最新状況");
+    expect(body).toContain(NON_MILESTONE_MSG); // 最新状況に結果が反映
+    expect(body).toContain("## 子課題");
+    // 進捗は据え置き（節目でないため追加なし）
+    const st = await store.loadOrCreate("s1");
+    expect(st.progress).toEqual([]);
+    expect(st.turnCount).toBe(1);
+  });
+
+  it("節目ターン: 進捗に1行追加・説明欄更新・コメント1件投稿", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.originalTask = "ログイン機能の実装";
+      s.progress = [];
+      s.lastPromptSummary = "ログイン実装";
+    });
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
+    // 節目コメント1件
+    expect(adapter.addComment).toHaveBeenCalledOnce();
+    expect(adapter.addComment).toHaveBeenCalledWith("PROJ-1", expect.stringContaining("ログイン実装"));
+    // 説明欄更新（進捗に1行・最新状況に結果）
+    expect(adapter.updateDescription).toHaveBeenCalledOnce();
+    const body = String(adapter.updateDescription.mock.calls[0][1]);
+    expect(body).toContain("## 進捗");
+    expect(body).toContain("ログイン実装"); // 節目1行が進捗に入る
+    expect(body).toContain(MILESTONE_MSG); // 最新状況
+    // state の progress に1行追加・有界
+    const st = await store.loadOrCreate("s1");
+    expect(st.progress).toEqual(["ログイン実装"]);
+    expect(st.turnCount).toBe(1);
+  });
+
+  it("同期先は getActiveIssue 優先（逸脱分割後はアクティブ課題へ同期）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; // セッション主課題
+      s.activeIssueKey = "PROJ-9"; // 分割後のアクティブ課題
+      s.childIssueKeys = ["PROJ-9", "PROJ-10"];
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.originalTask = "親タスク";
+      s.progress = [];
+      s.lastPrompt = "子の作業";
+    });
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
+    // 説明・状態遷移ともアクティブ課題 PROJ-9 へ
+    expect(adapter.updateDescription).toHaveBeenCalledWith("PROJ-9", expect.any(String));
+    expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-9", 3, undefined);
+    // 子課題ブロックに childKeys が列挙される
+    const body = String(adapter.updateDescription.mock.calls[0][1]);
+    expect(body).toContain("## 子課題");
+    expect(body).toContain("PROJ-9");
+    expect(body).toContain("PROJ-10");
+  });
+
+  it("activeIssueKey 無しなら st.issueKey へ同期する", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.originalTask = "タスク";
+      s.progress = [];
+      s.lastPrompt = "作業";
+    });
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
+    expect(adapter.updateDescription).toHaveBeenCalledWith("PROJ-1", expect.any(String));
+    expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-1", 3, undefined);
+  });
+
+  it("状態遷移を resolved にする（処理中→処理済み）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.lastStatus = "in_progress"; s.originalTask = "t"; s.progress = []; s.lastPrompt = "p";
+    });
+    const adapter = adapterWithIssue();
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
     expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-1", 3, undefined);
     const st = await store.loadOrCreate("s1");
-    expect(st.activityBuffer.length).toBe(0); // フラッシュ後は空
     expect(st.lastStatus).toBe("resolved");
   });
 
@@ -39,55 +155,88 @@ describe("runStop", () => {
     const store = new StateStore(dir);
     await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; });
     const adapter = adapterWithIssue();
-    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: true, raw: {} }, { store, adapter: adapter as any, projectId: 10 });
+    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: true, raw: {} }, { store, adapter: adapter as any, projectId: 10, judgment: DET });
+    expect(adapter.updateDescription).not.toHaveBeenCalled();
     expect(adapter.addComment).not.toHaveBeenCalled();
   });
 
-  it("adapter が例外を投げても伝播せず、add_comment と update_issue がキューに残る（オフライン耐久）", async () => {
+  it("非節目ターンの状態遷移はキューに残り、adapter 例外を伝播しない（オフライン耐久）", async () => {
     const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 }; });
-    await runPostTool({ tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", toolName: "Edit", toolUseId: "a", raw: {} }, { store, adapter: {} as any, projectId: 10 });
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.lastStatus = "in_progress"; s.originalTask = "t"; s.progress = []; s.lastPrompt = "p";
+    });
     const adapter = adapterWithIssue();
-    adapter.addComment.mockRejectedValue(new Error("fetch failed"));
     adapter.setStatus.mockRejectedValue(new Error("fetch failed"));
+    adapter.updateDescription.mockRejectedValue(new Error("fetch failed"));
     await expect(
-      runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: adapter as any, projectId: 10 }),
+      runStop(
+        { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+        { store, adapter: adapter as any, projectId: 10, judgment: DET },
+      ),
     ).resolves.toEqual({}); // セッションを止めない（非ブロッキング）
     const st = await store.loadOrCreate("s1");
-    expect(st.pendingQueue.map((o) => o.op).sort()).toEqual(["add_comment", "update_issue"]); // 状態遷移も失われない
+    // 非節目なのでコメントはキューに無い。状態遷移のみ残る
+    expect(st.pendingQueue.map((o) => o.op)).toEqual(["update_issue"]);
     expect(st.pendingQueue.every((o) => o.attempts === 1)).toBe(true);
     expect(st.lastStatus).toBe("resolved"); // 楽観更新（実遷移はキュー再送に委ねる）
   });
 
-  it("復帰後の drain（SessionEnd相当）で残 op が両方排出され状態遷移する", async () => {
+  it("節目ターンのオフライン: add_comment と update_issue がキューに残る", async () => {
     const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 }; });
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.lastStatus = "in_progress"; s.originalTask = "t"; s.progress = []; s.lastPrompt = "p";
+    });
+    const adapter = adapterWithIssue();
+    adapter.addComment.mockRejectedValue(new Error("fetch failed"));
+    adapter.setStatus.mockRejectedValue(new Error("fetch failed"));
+    adapter.updateDescription.mockRejectedValue(new Error("fetch failed"));
+    await expect(
+      runStop(
+        { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: MILESTONE_MSG, raw: {} },
+        { store, adapter: adapter as any, projectId: 10, judgment: DET },
+      ),
+    ).resolves.toEqual({});
+    const st = await store.loadOrCreate("s1");
+    expect(st.pendingQueue.map((o) => o.op).sort()).toEqual(["add_comment", "update_issue"]);
+    expect(st.pendingQueue.every((o) => o.attempts === 1)).toBe(true);
+    expect(st.lastStatus).toBe("resolved");
+  });
+
+  it("復帰後の drain（SessionEnd相当）で残 op が排出され状態遷移する", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.lastStatus = "in_progress"; s.originalTask = "t"; s.progress = []; s.lastPrompt = "p";
+    });
     const offline = adapterWithIssue();
-    offline.addComment.mockRejectedValue(new Error("fetch failed"));
     offline.setStatus.mockRejectedValue(new Error("fetch failed"));
-    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: offline as any, projectId: 10 });
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: offline as any, projectId: 10, judgment: DET },
+    );
 
     const online = adapterWithIssue();
-    await runSessionEnd({ tool: "claude", event: "session-end", sessionId: "s1", cwd: "/r", raw: {} }, { store, adapter: online as any, projectId: 10 });
-    expect(online.addComment).toHaveBeenCalledOnce();
+    await runSessionEnd({ tool: "claude", event: "session-end", sessionId: "s1", cwd: "/r", raw: {} }, { store, adapter: online as any, projectId: 10, judgment: DET });
     expect(online.setStatus).toHaveBeenCalledWith("PROJ-1", 3, undefined); // resolved へ遷移
     const st = await store.loadOrCreate("s1");
     expect(st.pendingQueue).toEqual([]); // 排出済み
   });
 
-  it("issueKey 無しでも deps 解決済みなら遅延作成し、集約コメント+状態遷移まで行う（Codex exec パリティ）", async () => {
+  it("issueKey 無しでも deps 解決済みなら遅延作成し、説明更新+状態遷移まで行う（Codex exec パリティ）", async () => {
     const store = new StateStore(dir);
     // SessionStart は発火していない（issueKey 無し）。post-tool のバッファのみ存在
     await runPostTool({ tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", toolName: "Edit", toolUseId: "a", raw: {} }, { store, adapter: {} as any, projectId: 10 });
     const adapter = adapterWithIssue();
     adapter.createIssue.mockResolvedValue({ id: 100, issueKey: "PROJ-100" });
     await runStop(
-      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} },
-      { store, adapter: adapter as any, projectId: 10, issueTypeId: 4236190, priorityId: 3 },
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, issueTypeId: 4236190, priorityId: 3, judgment: DET },
     );
     expect(adapter.createIssue).toHaveBeenCalledOnce();
     expect(adapter.createIssue).toHaveBeenCalledWith(expect.objectContaining({ issueTypeId: 4236190, priorityId: 3 }));
-    expect(adapter.addComment).toHaveBeenCalledOnce(); // 集約コメント
+    expect(adapter.updateDescription).toHaveBeenCalledWith("PROJ-100", expect.any(String)); // 説明更新
     expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-100", 3, undefined); // resolved へ遷移
     const st = await store.loadOrCreate("s1");
     expect(st.issueKey).toBe("PROJ-100");
@@ -102,9 +251,10 @@ describe("runStop", () => {
     await expect(
       runStop(
         { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} },
-        { store, adapter: adapter as any, projectId: 10, issueTypeId: 4236190, priorityId: 3 },
+        { store, adapter: adapter as any, projectId: 10, issueTypeId: 4236190, priorityId: 3, judgment: DET },
       ),
     ).resolves.toEqual({});
+    expect(adapter.updateDescription).not.toHaveBeenCalled();
     expect(adapter.addComment).not.toHaveBeenCalled();
   });
 
@@ -112,72 +262,79 @@ describe("runStop", () => {
     const store = new StateStore(dir);
     await runPostTool({ tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", toolName: "Edit", toolUseId: "a", raw: {} }, { store, adapter: {} as any, projectId: 10 });
     const adapter = adapterWithIssue();
-    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: adapter as any, projectId: 10 });
+    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: adapter as any, projectId: 10, judgment: DET });
     expect(adapter.createIssue).not.toHaveBeenCalled();
+    expect(adapter.updateDescription).not.toHaveBeenCalled();
     expect(adapter.addComment).not.toHaveBeenCalled();
   });
 
-  it("ターン要約は依頼・結果・変更のみ（実行コマンド・ツール件数は出さない）", async () => {
-    const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "バグを直してテストも追加して"; });
-    const base = { tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/r", raw: {} } as const;
-    await runPostTool({ ...base, toolName: "Edit", toolUseId: "a", toolInput: { filePath: "/r/src/foo.ts" } }, { store, adapter: {} as any, projectId: 10 });
-    await runPostTool({ ...base, toolName: "Edit", toolUseId: "b", toolInput: { filePath: "/r/src/foo.ts" } }, { store, adapter: {} as any, projectId: 10 });
-    await runPostTool({ ...base, toolName: "Bash", toolUseId: "c", toolInput: { command: "npm test\n--watch" } }, { store, adapter: {} as any, projectId: 10 });
-    const adapter = adapterWithIssue();
-    await runStop(
-      { tool: "codex", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: "直しました。テストも追加済みです。", raw: {} },
-      { store, adapter: adapter as any, projectId: 10 },
-    );
-    const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain("## ターン #1");
-    expect(body).toContain("### 依頼");
-    expect(body).toContain("バグを直してテストも追加して");
-    expect(body).toContain("### 結果");
-    expect(body).toContain("直しました。テストも追加済みです。");
-    expect(body).toContain("### 変更");
-    expect(body).toContain("- src/foo.ts(2)"); // vcs 無し → リンク無しの従来表記
-    expect(body).not.toContain("### 実行"); // G20: コマンド一覧は全廃
-    expect(body).not.toContain("ツール使用"); // G20: ツール件数は全廃
-    const st = await store.loadOrCreate("s1");
-    expect(st.turnCount).toBe(1);
-    expect(st.lastPrompt).toBeUndefined(); // 消費後クリア
-  });
-
-  it("lastPromptSummary があれば ### 依頼 に原文ではなく整理結果を載せ、使用後にクリアする", async () => {
+  it("依頼整理（lastPromptSummary）が節目1行/コメントの素材に使われ、使用後にクリアされる", async () => {
     const store = new StateStore(dir);
     await store.withLock("s1", (s) => {
       s.issueKey = "PROJ-1";
-      s.lastPrompt = "とても長い原文のプロンプトがここに入っている";
-      s.lastPromptSummary = "ログインバグの修正\n- 500エラーの原因調査\n- テスト追加";
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.originalTask = "親タスク";
+      s.progress = [];
+      s.lastPrompt = "とても長い原文のプロンプト";
+      s.lastPromptSummary = "ログインバグの修正";
     });
     const adapter = adapterWithIssue();
-    await runStop({ tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} }, { store, adapter: adapter as any, projectId: 10 });
-    const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain("### 依頼");
-    expect(body).toContain("ログインバグの修正");
-    expect(body).toContain("- 500エラーの原因調査");
-    expect(body).not.toContain("とても長い原文"); // 整理結果が主役（原文はフォールバックのみ）
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
+    // 節目1行は整理結果（原文ではない）
+    expect(adapter.addComment).toHaveBeenCalledWith("PROJ-1", expect.stringContaining("ログインバグの修正"));
+    expect(adapter.addComment).not.toHaveBeenCalledWith("PROJ-1", expect.stringContaining("とても長い原文"));
     const st = await store.loadOrCreate("s1");
-    expect(st.lastPromptSummary).toBeUndefined(); // 使用後クリア
+    expect(st.lastPrompt).toBeUndefined();
+    expect(st.lastPromptSummary).toBeUndefined();
+    expect(st.progress).toEqual(["ログインバグの修正"]);
   });
 
-  it("変更ファイルもコミットも無ければ ### 変更 ごと省略する", async () => {
+  it("2ターン連続: 2回目の resolved 遷移は同値スキップされコメントは節目時のみ", async () => {
     const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "調査だけして"; });
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.originalTask = "t"; s.progress = []; s.lastPrompt = "依頼1";
+    });
+    const adapter = adapterWithIssue();
+    // 1ターン目: 非節目 → コメント無し・resolved へ遷移
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
+    // 2ターン目: 節目 → コメント1件・状態は resolved 同値スキップ
+    await store.withLock("s1", (s) => { s.lastPrompt = "依頼2"; });
+    await runStop(
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
+    );
+
+    expect(adapter.updateDescription).toHaveBeenCalledTimes(2); // 説明は毎ターン
+    expect(adapter.addComment).toHaveBeenCalledTimes(1); // 節目ターンのみ
+    expect(adapter.setStatus).toHaveBeenCalledTimes(1); // 2回目は resolved 同値スキップ（code 7 回避）
+    const st = await store.loadOrCreate("s1");
+    expect(st.turnCount).toBe(2);
+  });
+
+  it("resolutionFixedId=0 でも resolved 遷移の PATCH に resolutionId が含まれる（falsy 罠回避）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.originalTask = "t"; s.progress = []; s.lastPrompt = "p";
+    });
     const adapter = adapterWithIssue();
     await runStop(
-      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: "調査結果です。", raw: {} },
-      { store, adapter: adapter as any, projectId: 10 },
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, resolutionFixedId: 0, judgment: DET },
     );
-    const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain("### 結果");
-    expect(body).not.toContain("### 変更");
+    expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-1", 3, undefined, 0); // 完了理由=対応済み(id:0)
   });
 
-  it("lastAssistantMessage が無ければ transcript 末尾から結果を抽出する（Claude）", async () => {
+  it("lastAssistantMessage が無ければ transcript 末尾から結果を抽出し最新状況へ反映する（Claude）", async () => {
     const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; });
+    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.originalTask = "t"; s.progress = []; });
     const transcriptPath = join(dir, "transcript.jsonl");
     writeFileSync(transcriptPath, [
       JSON.stringify({ type: "user", message: { role: "user", content: "依頼" } }),
@@ -186,111 +343,24 @@ describe("runStop", () => {
     const adapter = adapterWithIssue();
     await runStop(
       { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, transcriptPath, raw: {} },
-      { store, adapter: adapter as any, projectId: 10 },
+      { store, adapter: adapter as any, projectId: 10, judgment: DET },
     );
-    const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain("### 結果");
+    const body = String(adapter.updateDescription.mock.calls[0][1]);
+    expect(body).toContain("## 最新状況");
     expect(body).toContain("transcriptの最終回答");
   });
 
-  it("2ターン連続で2コメント投稿され、2回目の resolved 遷移は同値スキップされる", async () => {
+  it("backlog 記法では説明欄が Backlog 記法で出力される", async () => {
     const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "依頼1"; });
-    const adapter = adapterWithIssue();
-    const ev = { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} } as const;
-    await runStop(ev, { store, adapter: adapter as any, projectId: 10 });
-    await store.withLock("s1", (s) => { s.lastPrompt = "依頼2"; }); // 次ターンの依頼（状態フリップ無しのまま stop）
-    await runStop(ev, { store, adapter: adapter as any, projectId: 10 });
-
-    expect(adapter.addComment).toHaveBeenCalledTimes(2); // セッション固定 id で潰れない
-    expect(String(adapter.addComment.mock.calls[0][1])).toContain("ターン #1");
-    expect(String(adapter.addComment.mock.calls[1][1])).toContain("ターン #2");
-    expect(String(adapter.addComment.mock.calls[1][1])).toContain("依頼2");
-    expect(adapter.setStatus).toHaveBeenCalledTimes(1); // 2回目は resolved 同値スキップ（code 7 回避）
-    const st = await store.loadOrCreate("s1");
-    expect(st.turnCount).toBe(2);
-  });
-
-  it("vcs と git があれば変更ファイル/コミットをリンク化し、未push を注記する", async () => {
-    const store = new StateStore(dir);
-    const HEAD = "a".repeat(40);
-    const COMMIT = "b".repeat(40);
-    const START = "c".repeat(40);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.turnStartHead = START; });
-    await runPostTool(
-      { tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/repo", toolName: "Edit", toolUseId: "a", toolInput: { filePath: "/repo/src/foo.ts" } },
-      { store, adapter: {} as any, projectId: 10 },
-    );
-    const adapter = adapterWithIssue();
-    const git = {
-      headSha: vi.fn().mockResolvedValue(HEAD),
-      branchName: vi.fn().mockResolvedValue("main"),
-      commitsBetween: vi.fn().mockResolvedValue({ commits: [{ sha: COMMIT, subject: "fix: bug" }] }),
-      isOnRemote: vi.fn().mockResolvedValue(false),
-    };
-    await runStop(
-      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/repo", stopHookActive: false, raw: {} },
-      { store, adapter: adapter as any, projectId: 10, vcs: { kind: "github", owner: "o", repo: "r" }, git: git as any, root: "/repo" },
-    );
-    const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain(`[src/foo.ts(1)](https://github.com/o/r/blob/${HEAD}/src/foo.ts)`); // rev=このターンのHEAD
-    expect(body).toContain(`[${COMMIT.slice(0, 7)} fix: bug](https://github.com/o/r/commit/${COMMIT})（未push）`);
-    expect(git.commitsBetween).toHaveBeenCalledWith("/repo", START);
-    const st = await store.loadOrCreate("s1");
-    expect(st.turnStartHead).toBeUndefined(); // 消費後クリア
-  });
-
-  it("turnStartHead の到達不能（reason）はコミット列挙をスキップして注記する", async () => {
-    const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.turnStartHead = "c".repeat(40); });
-    const adapter = adapterWithIssue();
-    const git = {
-      headSha: vi.fn().mockResolvedValue(undefined),
-      branchName: vi.fn().mockResolvedValue(undefined),
-      commitsBetween: vi.fn().mockResolvedValue({ commits: [], reason: "コミット列挙不可（開始点が履歴に見つからない可能性）" }),
-      isOnRemote: vi.fn().mockResolvedValue(false),
-    };
-    await runStop(
-      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/repo", stopHookActive: false, raw: {} },
-      { store, adapter: adapter as any, projectId: 10, git: git as any, root: "/repo" },
-    );
-    const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain("コミット: コミット列挙不可");
-    expect(git.isOnRemote).not.toHaveBeenCalled();
-  });
-
-  it("resolutionFixedId=0 でも resolved 遷移の PATCH に resolutionId が含まれる（falsy 罠回避）", async () => {
-    const store = new StateStore(dir);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 }; });
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; s.originalTask = "依頼です"; s.progress = []; s.lastPrompt = "p";
+    });
     const adapter = adapterWithIssue();
     await runStop(
-      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, raw: {} },
-      { store, adapter: adapter as any, projectId: 10, resolutionFixedId: 0 },
+      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/r", stopHookActive: false, lastAssistantMessage: NON_MILESTONE_MSG, raw: {} },
+      { store, adapter: adapter as any, projectId: 10, textFormattingRule: "backlog", judgment: DET },
     );
-    expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-1", 3, undefined, 0); // 完了理由=対応済み(id:0)
-  });
-
-  it("backlog 記法では見出し/リンクが Backlog 記法で出力される", async () => {
-    const store = new StateStore(dir);
-    const HEAD = "a".repeat(40);
-    await store.withLock("s1", (s) => { s.issueKey = "PROJ-1"; s.lastPrompt = "依頼です"; });
-    await runPostTool(
-      { tool: "claude", event: "post-tool", sessionId: "s1", cwd: "/repo", toolName: "Edit", toolUseId: "a", toolInput: { filePath: "/repo/a.ts" } },
-      { store, adapter: {} as any, projectId: 10 },
-    );
-    const adapter = adapterWithIssue();
-    const git = {
-      headSha: vi.fn().mockResolvedValue(HEAD),
-      branchName: vi.fn().mockResolvedValue("main"),
-      commitsBetween: vi.fn().mockResolvedValue({ commits: [] }),
-      isOnRemote: vi.fn().mockResolvedValue(true),
-    };
-    await runStop(
-      { tool: "claude", event: "stop", sessionId: "s1", cwd: "/repo", stopHookActive: false, raw: {} },
-      { store, adapter: adapter as any, projectId: 10, textFormattingRule: "backlog", vcs: { kind: "github", owner: "o", repo: "r" }, git: git as any, root: "/repo" },
-    );
-    const body = String(adapter.addComment.mock.calls[0][1]);
-    expect(body).toContain("** ターン #1"); // 行頭 *（レベル数）
-    expect(body).toContain(`[[a.ts(1)>https://github.com/o/r/blob/${HEAD}/a.ts]]`); // [[text>url]]
+    const body = String(adapter.updateDescription.mock.calls[0][1]);
+    expect(body).toContain("** タスク"); // Backlog 記法の見出し（行頭 *）
   });
 });

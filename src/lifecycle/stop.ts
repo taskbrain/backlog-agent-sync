@@ -2,16 +2,17 @@ import type { CanonicalEvent, ActivityEntry } from "../types.js";
 import { ensureSessionIssue, opDrainHandler, type LifecycleDeps, type HookOutput } from "./session-start.js";
 import { FILE_TOOLS } from "./post-tool.js";
 import { readLastAssistantText } from "../transcript.js";
-import { defaultGitOps } from "../vcs/git.js";
-import { fileUrl, commitUrl } from "../vcs/linker.js";
-import { renderer, type MarkupRenderer } from "../markup.js";
+import { getActiveIssue } from "../state/store.js";
+import { getBackend } from "../judgment/index.js";
+import { buildDescription, appendMilestone, type ChildLink } from "../issue/description.js";
 
-const PROMPT_MAX = 500;
 const RESULT_MAX = 1200;
 const RESULT_MAX_BYTES = 262144;
 const BODY_MAX = 40000; // Backlog コメント上限は未公表（実測5万）のため安全側で切詰
+const PROGRESS_MAX_LINES = 20; // ## 進捗 の有界化（appendMilestone）
+const MILESTONE_LINE_MAX = 200; // 節目1行・節目コメントの切詰
 
-/** 変更ファイル → 回数の Map（リンク化リスト用）。 */
+/** 変更ファイル → 回数の Map（変更ファイル集計用）。 */
 export function countFiles(entries: ActivityEntry[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const e of entries) {
@@ -31,40 +32,16 @@ async function resolveResult(ev: CanonicalEvent): Promise<string | undefined> {
   return undefined;
 }
 
-/** ### 変更 のリスト行: ファイル（blob リンク）+ コミット（commit リンク + 未push 注記）。 */
-async function buildChangeLines(
-  ev: CanonicalEvent,
-  deps: LifecycleDeps,
-  md: MarkupRenderer,
-  entries: ActivityEntry[],
-  turnStartHead: string | undefined,
-): Promise<string[]> {
-  const git = deps.git ?? defaultGitOps;
-  const root = deps.root ?? ev.cwd;
-  const lines: string[] = [];
+/** 1 行の節目テキスト（依頼整理 > 結果先頭行 の順で素材化し切詰）。 */
+function milestoneLine(request: string | undefined, result: string | undefined): string {
+  const src = (request?.trim() || result?.trim() || "").replace(/\s+/g, " ").trim();
+  if (!src) return "節目";
+  return src.length > MILESTONE_LINE_MAX ? `${src.slice(0, MILESTONE_LINE_MAX)}…` : src;
+}
 
-  // 変更ファイル（rev=このターンの HEAD で permalink。git/vcs 不在ならテキストのみ）
-  const turnHead = await git.headSha(root);
-  for (const [file, n] of countFiles(entries)) {
-    const label = `${file}(${n})`;
-    const url = deps.vcs && turnHead ? fileUrl(deps.vcs, file, turnHead) : undefined;
-    lines.push(md.listItem(url ? md.link(label, url) : label));
-  }
-
-  // コミット列挙（turnStartHead..HEAD。開始点不明はスキップ+注記）
-  if (turnStartHead) {
-    const { commits, reason } = await git.commitsBetween(root, turnStartHead);
-    if (reason) {
-      lines.push(md.listItem(`コミット: ${reason}`));
-    }
-    for (const c of commits) {
-      const label = `${c.sha.slice(0, 7)} ${c.subject}`;
-      const url = deps.vcs ? commitUrl(deps.vcs, c.sha) : undefined;
-      const pushed = await git.isOnRemote(root, c.sha);
-      lines.push(md.listItem(`コミット: ${url ? md.link(label, url) : label}${pushed ? "" : "（未push）"}`));
-    }
-  }
-  return lines;
+/** childIssueKeys（string[]）を ChildLink へ変換。URL 生成器が無いため label=key。 */
+function toChildLinks(childKeys: string[]): ChildLink[] {
+  return childKeys.map((key) => ({ key, label: key }));
 }
 
 export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<HookOutput> {
@@ -80,27 +57,68 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
     // 作成失敗（オフライン/権限等）は非ブロッキングで no-op（init 未解決時は undefined が返る）
   }
   if (!ensured) return {};
-  const issueKey = ensured; // const 化（drain クロージャ内での narrowing 維持）
 
-  const md = renderer(deps.textFormattingRule ?? "markdown");
-  const entries = st.activityBuffer;
+  // 同期先 = 逸脱分割後のアクティブ課題。未分割時はセッション主課題（ensureSessionIssue の戻り）。
+  const active = getActiveIssue(st);
+  const syncKey = active.key ?? ensured;
+
   const turn = (st.turnCount ?? 0) + 1;
-  // 依頼は LLM 整理（lastPromptSummary）を主役に、無ければ原文へフォールバック
-  const request = st.lastPromptSummary?.trim() || st.lastPrompt?.trim()?.slice(0, PROMPT_MAX);
+  const request = st.lastPromptSummary?.trim() || st.lastPrompt?.trim();
   const result = await resolveResult(ev);
-  const changeLines = await buildChangeLines(ev, deps, md, entries, st.turnStartHead);
+  const changedFiles = [...countFiles(st.activityBuffer).keys()];
 
-  // ターン要約 v3（G20: 人間向けに純化。ツール件数・コマンド一覧は出さない）
-  const lines: string[] = [md.heading(2, `ターン #${turn}`)];
-  if (request) lines.push(md.heading(3, "依頼"), request);
-  if (result) lines.push(md.heading(3, "結果"), result);
-  if (changeLines.length) lines.push(md.heading(3, "変更"), ...changeLines); // 変更が無ければセクションごと省略
-  const body = lines.join("\n").slice(0, BODY_MAX);
+  // 現状サマリ（説明欄再構築前の現在値）を導出。state に保持が無いため originalTask + progress から組む。
+  const originalTask = st.originalTask ?? "";
+  const prevProgress = st.progress ?? [];
+  const currentSummary = buildDescription({ originalTask, progress: prevProgress, latest: "", children: [] });
 
-  // 送信前に耐久記録（オフラインでも欠落しない・§15）。enqueue id はターン毎に一意
-  // （セッション固定 id だと drain の成功判定 Map で 2 ターン目以降が潰れるため）
-  await store.enqueue(ev.sessionId, { id: `stop:${ev.sessionId}:${turn}`, op: "add_comment", payload: { content: body }, attempts: 0 });
-  // 同値ステータス PATCH は Backlog が code 7 で拒否するため、resolved 済みならスキップ
+  // 判定 backend でサマリ更新（claude 起動は backend 内のガード/フォールバックに委ねる）
+  const { summary, isMilestone } = await getBackend(deps.judgment).updateSummary({
+    sessionId: ev.sessionId,
+    originalTask,
+    currentSummary,
+    turnPrompt: request,
+    turnResult: result,
+    changedFiles,
+  });
+
+  // 節目のみ進捗へ 1 行追加（有界化）。それ以外は進捗据え置き。
+  const nextProgress = isMilestone
+    ? appendMilestone(prevProgress, milestoneLine(request, result), PROGRESS_MAX_LINES)
+    : prevProgress;
+
+  // 説明欄は毎ターン再構築して上書き（4ブロック: タスク/進捗/最新状況/子課題）。
+  const body = buildDescription(
+    {
+      originalTask,
+      progress: nextProgress,
+      latest: summary,
+      children: toChildLinks(active.childKeys),
+    },
+    deps.textFormattingRule ?? "markdown",
+  ).slice(0, BODY_MAX);
+
+  // 説明欄更新は耐久キューを介さず直接呼ぶ（buildDescription が常に全体を再構築するため、
+  // 失敗してもターン次第で自己修復する。非ブロッキングのため失敗は握り潰す）。
+  try {
+    await adapter.updateDescription(syncKey, body);
+  } catch {
+    // オフライン/権限等の失敗はセッションを止めない（次ターンの説明更新で回復）
+  }
+
+  // 節目コメントは isMilestone の時だけ 1 件（耐久キュー経由。従来のターン毎 add_comment は撤去）。
+  // enqueue id はターン毎に一意（セッション固定 id だと drain の index 突合で潰れるため）。
+  if (isMilestone) {
+    await store.enqueue(ev.sessionId, {
+      id: `stop-milestone:${ev.sessionId}:${turn}`,
+      op: "add_comment",
+      payload: { content: milestoneLine(request, result) },
+      attempts: 0,
+    });
+  }
+
+  // 状態遷移（処理中⇄処理済み）は維持。同値ステータス PATCH は Backlog が code 7 で拒否するため
+  // resolved 済みならスキップ（Phase1 の no-op スキップ）。
   const flipStatus = st.lastStatus !== "resolved";
   if (flipStatus) {
     const payload: Record<string, unknown> = { statusId: st.statusMap.resolved };
@@ -109,22 +127,22 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
     await store.enqueue(ev.sessionId, { id: `stop-status:${ev.sessionId}:${turn}`, op: "update_issue", payload, attempts: 0 });
   }
 
-  // enqueue 済みのためバッファ/lastPrompt/lastPromptSummary/turnStartHead はクリアして安全。lastStatus は楽観更新
+  // 状態の永続化: バッファ/lastPrompt/lastPromptSummary/turnStartHead クリア、progress 更新、turnCount/lastStatus。
   await store.withLock(ev.sessionId, (s) => {
     s.activityBuffer = [];
     s.lastPrompt = undefined;
     s.lastPromptSummary = undefined;
     s.turnStartHead = undefined;
     s.turnCount = turn;
+    if (isMilestone) s.progress = nextProgress;
     if (flipStatus) s.lastStatus = "resolved";
   });
 
   // drain は失敗 op を attempts++ で残置するため、オフラインでも例外を伝播しない。
   // 同値 PATCH（Backlog code 7）の事前スキップ用に「このターン開始前」の既知ステータスを渡す。
-  // st は楽観更新前のスナップショット（行73 で load）なので st.lastStatus はターン開始前の値。
-  // 注: flipStatus=true（初回 resolved 遷移）では lastStatus は in_progress 等で resolved と非同値
-  // のため skip は発火せず setStatus が走る。既に resolved 済みの再 drain でのみ同値 skip が効く。
+  // st は楽観更新前のスナップショット（loadOrCreate 直後）なので st.lastStatus はターン開始前の値。
   const currentStatusId = st.lastStatus ? st.statusMap[st.lastStatus] : undefined;
-  await store.drain(ev.sessionId, opDrainHandler(adapter, issueKey, currentStatusId));
+  await store.drain(ev.sessionId, opDrainHandler(adapter, syncKey, currentStatusId));
+
   return {};
 }
