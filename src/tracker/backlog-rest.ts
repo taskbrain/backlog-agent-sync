@@ -204,6 +204,19 @@ export class BacklogRest {
     await this.request("PATCH", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "write", rest as unknown as Record<string, unknown>);
   }
 
+  /**
+   * 既存課題の後付け親子化（PATCH /issues/:key に parentIssueId を送る）。
+   * Backlog API v2 で永続化されることを実機確認済み（Phase 2 ライフサイクル配線で使用）。
+   */
+  async setParent(issueIdOrKey: string | number, parentIssueId: number): Promise<void> {
+    await this.request("PATCH", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "write", { parentIssueId });
+  }
+
+  /** 既存課題の説明文だけを後付け更新（PATCH /issues/:key に description を送る）。 */
+  async updateIssueDescription(issueIdOrKey: string | number, description: string): Promise<void> {
+    await this.request("PATCH", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "write", { description });
+  }
+
   async addComment(issueIdOrKey: string | number, content: string): Promise<void> {
     await this.request("POST", `/issues/${encodeURIComponent(String(issueIdOrKey))}/comments`, "write", { content });
   }

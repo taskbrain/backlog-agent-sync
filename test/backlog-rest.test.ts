@@ -194,3 +194,66 @@ describe("BacklogRest（G19: フィールド/Backlog Git）", () => {
     expect(body).toContain("resolutionId=0");
   });
 });
+
+describe("BacklogRest（Phase 2: 親子化 / 説明後付け）", () => {
+  function restWith(fetchMock: ReturnType<typeof vi.fn>) {
+    return new BacklogRest(cfg, { fetch: fetchMock, rateLimiter: { beforeRequest: async () => {}, handle429: async () => {} } as any });
+  }
+
+  it("createIssue は parentIssueId を body に含める", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 2, issueKey: "PROJ-2" }));
+    const rest = restWith(fetchMock);
+    const ref = await rest.createIssue({ projectId: 10, summary: "子", issueTypeId: 1, priorityId: 3, parentIssueId: 700 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/issues");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = String((init as RequestInit).body);
+    expect(body).toContain("parentIssueId=700");
+    expect(ref.issueKey).toBe("PROJ-2");
+  });
+
+  it("setParent は PATCH /issues/:key に parentIssueId を送る", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 2, issueKey: "PROJ-2" }));
+    const rest = restWith(fetchMock);
+    await rest.setParent("PROJ-2", 700);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/issues/PROJ-2");
+    expect((init as RequestInit).method).toBe("PATCH");
+    const body = String((init as RequestInit).body);
+    expect(body).toBe("parentIssueId=700");
+  });
+
+  it("setParent は数値の issueId も URL エンコードして送る", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({}));
+    const rest = restWith(fetchMock);
+    await rest.setParent(12345, 700);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/issues/12345");
+    expect((init as RequestInit).method).toBe("PATCH");
+    expect(String((init as RequestInit).body)).toContain("parentIssueId=700");
+  });
+
+  it("updateIssueDescription は PATCH /issues/:key に description を送る", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({}));
+    const rest = restWith(fetchMock);
+    await rest.updateIssueDescription("PROJ-3", "概要\n本文");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/issues/PROJ-3");
+    expect((init as RequestInit).method).toBe("PATCH");
+    // form() は URLSearchParams ベース（x-www-form-urlencoded）。同じ方式で期待値を作る。
+    const body = String((init as RequestInit).body);
+    expect(body).toBe(new URLSearchParams({ description: "概要\n本文" }).toString());
+    expect(body).toContain("%0A"); // 改行が保持される
+  });
+
+  it("setParent は 429 後にリトライする", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonRes({ errors: [] }, 429, { "X-RateLimit-Reset": "0" }))
+      .mockResolvedValueOnce(jsonRes({ id: 2, issueKey: "PROJ-2" }));
+    const handle429 = vi.fn().mockResolvedValue(undefined);
+    const rest = new BacklogRest(cfg, { fetch: fetchMock, rateLimiter: { beforeRequest: async () => {}, handle429 } as any });
+    await rest.setParent("PROJ-2", 700);
+    expect(handle429).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
