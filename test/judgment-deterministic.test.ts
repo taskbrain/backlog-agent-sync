@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { DeterministicBackend } from "../src/judgment/deterministic.js";
-import { getBackend } from "../src/judgment/index.js";
+import { getBackend, ClaudePBackend } from "../src/judgment/index.js";
 import type { JudgmentInput } from "../src/judgment/types.js";
 
 const backend = new DeterministicBackend();
@@ -181,8 +181,15 @@ describe("isMilestone の過検知是正（#5: 完了/状態変更/分割/エラ
 });
 
 describe("getBackend", () => {
-  it("現状は決定論 backend を返す", () => {
-    const b = getBackend();
-    expect(b).toBeInstanceOf(DeterministicBackend);
+  it("既定（未設定 = auto）は ClaudePBackend を返す（内部で決定論へフォールバック）", () => {
+    expect(getBackend()).toBeInstanceOf(ClaudePBackend);
+  });
+
+  it('backend="auto" は ClaudePBackend を返す', () => {
+    expect(getBackend({ backend: "auto" })).toBeInstanceOf(ClaudePBackend);
+  });
+
+  it('backend="deterministic" は決定論 backend を返す', () => {
+    expect(getBackend({ backend: "deterministic" })).toBeInstanceOf(DeterministicBackend);
   });
 });

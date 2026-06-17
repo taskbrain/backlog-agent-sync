@@ -1,15 +1,9 @@
-import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
+import { defaultExec, type ExecFn } from "./claude-p.js";
 
-export type ExecFn = (cmd: string, args: string[], opts: { timeout: number; cwd: string; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
-
-const defaultExec: ExecFn = (cmd, args, opts) =>
-  new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: opts.timeout, cwd: opts.cwd, env: opts.env, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve({ stdout: String(stdout) });
-    });
-  });
+// claude -p 低レベル実行（ExecFn/defaultExec）は src/claude-p.ts に一本化し DRY 化。
+// 既存 import 互換のため型を再公開する（test/summarize.test.ts が `type ExecFn` を本モジュールから取得）。
+export type { ExecFn } from "./claude-p.js";
 
 const SHORT_PROMPT_MAX = 80; // これ未満の単文は原文で十分（コスト/レイテンシ節約）
 const PROMPT_INPUT_MAX = 8000;

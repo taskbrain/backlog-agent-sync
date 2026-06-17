@@ -1,22 +1,27 @@
 import type { JudgmentBackend } from "./types.js";
+import type { JudgmentConfig } from "../types.js";
+import { resolveJudgmentConfig } from "../config.js";
 import { DeterministicBackend } from "./deterministic.js";
+import { ClaudePBackend, defaultClaudePRunner } from "./claude-p.js";
 
 export type { JudgmentBackend, JudgmentInput, Divergence, SummaryUpdate } from "./types.js";
 export { DeterministicBackend } from "./deterministic.js";
+export { ClaudePBackend, defaultClaudePRunner, type ClaudePRunner } from "./claude-p.js";
 
 /**
- * 判定 backend を返すファクトリ。現状は決定論 backend 固定。
+ * 判定 backend を返すファクトリ。project.json の `judgment` ブロックに応じて選択する。
  *
- * 将来の拡張点（LLM backend）:
- * prompt フックは判定結果をコードへ渡せないため、決定論 backend が全オプション共通の基盤。
- * judgment backend の選択真実源は spec の `judgment.backend`（project.json の `judgment` ブロック）。
- * LLM backend を有効化する場合は、ここで `judgment.backend` の値を見て `new LlmBackend(...)` を返す分岐を追加する。
- * 今は決定論固定（設定読み取りも未配線）。
+ * - "deterministic": 決定論のみ（LLM 不使用）。
+ * - "auto"（既定） / "claude-p": ClaudePBackend（claude -p サブスク認証で判定）。
+ *   ClaudePBackend は内部で API キー検出 / 失敗時に決定論 backend へフォールバックするため、
+ *   prompt フックが判定結果をコードへ渡せない経路でも決定論が常に基盤として機能する。
  *
  * 注意: `FieldRules.summarize` は G20 のプロンプト整理（依頼文の LLM 要約）用の別軸設定であり、
  * judgment backend の選択とは無関係。混同しないこと。
  */
-export function getBackend(): JudgmentBackend {
-  // TODO(llm-backend): project.json の judgment.backend に応じて LLM backend を選択する分岐をここに追加。
-  return new DeterministicBackend();
+export function getBackend(judgment?: JudgmentConfig): JudgmentBackend {
+  const { backend, model } = resolveJudgmentConfig(judgment);
+  if (backend === "deterministic") return new DeterministicBackend();
+  // "auto" | "claude-p": ClaudePBackend 自身がガード/フォールバックを内包する。
+  return new ClaudePBackend(new DeterministicBackend(), defaultClaudePRunner, model);
 }

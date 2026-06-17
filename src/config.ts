@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { BacklogConfig } from "./types.js";
+import type { BacklogConfig, JudgmentConfig } from "./types.js";
 
 export function resolveConfig(env: NodeJS.ProcessEnv): BacklogConfig {
   const domain = env.BACKLOG_DOMAIN;
@@ -27,4 +27,15 @@ export function seedLedgerPath(cwd: string): string {
 
 export function docsLedgerPath(cwd: string): string {
   return join(cwd, ".claude", "backlog-agent-sync", "docs-ledger.json");
+}
+
+/**
+ * project.json の judgment ブロックを既定値で正規化する。
+ * 既定: backend="auto"（model 未設定 = claude 既定モデル）。
+ * 不正な backend 値は "auto" に丸める（後方互換・安全側）。
+ */
+export function resolveJudgmentConfig(judgment?: JudgmentConfig): Required<Pick<JudgmentConfig, "backend">> & { model?: string } {
+  const backend = judgment?.backend;
+  const normalized = backend === "deterministic" || backend === "claude-p" || backend === "auto" ? backend : "auto";
+  return { backend: normalized, model: judgment?.model };
 }

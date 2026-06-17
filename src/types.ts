@@ -59,6 +59,9 @@ export interface SessionState {
   lastPromptSummary?: string; // このターンのプロンプトの LLM 整理（stop の ### 依頼 で消費・クリア）
   turnCount?: number; // ターン要約の連番
   turnStartHead?: string; // ターン開始時の HEAD SHA（stop のコミット列挙に使用）
+  activeIssueKey?: string; // 現在アクティブな課題キー（判定で切替。Wave2 が消費）
+  parentIssueKey?: string; // activeIssueKey の親課題キー（子課題作成時に設定）
+  childIssueKeys?: string[]; // この親の下に作成済みの子課題キー一覧
 }
 
 export interface BacklogConfig {
@@ -97,6 +100,19 @@ export interface FieldRules {
   affectedVersion?: string; // "<name>" | "off"
   resolutionOnResolve?: boolean;
   summarize?: "off" | "claude"; // 依頼文の LLM 整理（既定 "claude" = サブスク認証の claude CLI で haiku 1呼出/ターン。"off" で無効）
+}
+
+/** project.json `judgment`（判定 backend の選択。spec §5）。 */
+export interface JudgmentConfig {
+  /** 判定に使う claude モデル（未設定 = claude 既定モデル。例 "haiku" | "sonnet" | "opus"）。 */
+  model?: string;
+  /**
+   * backend 選択。
+   * - "auto"（既定）: ClaudePBackend（API キー検出/失敗時は決定論へフォールバック）
+   * - "claude-p": 同上を明示
+   * - "deterministic": 決定論のみ（LLM 不使用）
+   */
+  backend?: "auto" | "claude-p" | "deterministic";
 }
 
 /**
@@ -138,6 +154,7 @@ export interface ProjectCache {
   textFormattingRule?: TextFormattingRule;
   vcs?: VcsConfig;
   fieldRules?: FieldRules;
+  judgment?: JudgmentConfig;
   docsSync?: DocsSyncConfig;
   resolvedAt?: string;
 }

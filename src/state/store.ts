@@ -143,3 +143,23 @@ export class StateStore {
     });
   }
 }
+
+// ---- アクティブ課題アクセサ（Wave2 のライフサイクル/Stop が共用。SessionState を直接操作） ----
+
+/** 現在アクティブな課題情報（未設定なら key=undefined）。 */
+export function getActiveIssue(st: SessionState): { key?: string; parentKey?: string; childKeys: string[] } {
+  return { key: st.activeIssueKey, parentKey: st.parentIssueKey, childKeys: st.childIssueKeys ?? [] };
+}
+
+/**
+ * アクティブ課題を設定する（withLock のコールバック内で SessionState を直接変更する用途）。
+ * childKeys 省略時は既存値を維持。parentKey は明示 undefined でクリア可。
+ */
+export function setActiveIssue(
+  st: SessionState,
+  active: { key: string; parentKey?: string; childKeys?: string[] },
+): void {
+  st.activeIssueKey = active.key;
+  st.parentIssueKey = active.parentKey;
+  if (active.childKeys !== undefined) st.childIssueKeys = active.childKeys;
+}
