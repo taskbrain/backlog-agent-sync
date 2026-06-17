@@ -89,4 +89,69 @@ describe("buildRuntime", () => {
     writeFileSync(path, JSON.stringify({ projectId: 1, fieldRules: { summarize: "off" } }), "utf8");
     expect((await buildRuntime(dir)).deps.summarize).toBeUndefined(); // "off" で無効化
   });
+
+  // ---- 修正(a): config.judgment を本番ハンドラ deps へ伝播 ----
+
+  it("project.json の judgment（model/backend）を deps へ載せる", async () => {
+    mkdirSync(join(dir, ".claude", "backlog-agent-sync"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "backlog-agent-sync", "project.json"),
+      JSON.stringify({ projectId: 1, judgment: { backend: "auto", model: "haiku" } }), "utf8");
+    const { deps } = await buildRuntime(dir);
+    expect(deps.judgment).toEqual({ backend: "auto", model: "haiku" });
+  });
+
+  it("judgment.backend=deterministic を deps へ載せる", async () => {
+    mkdirSync(join(dir, ".claude", "backlog-agent-sync"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "backlog-agent-sync", "project.json"),
+      JSON.stringify({ projectId: 1, judgment: { backend: "deterministic" } }), "utf8");
+    const { deps } = await buildRuntime(dir);
+    expect(deps.judgment).toMatchObject({ backend: "deterministic" });
+  });
+
+  it("judgment 未設定（旧 project.json）でも既定 backend=auto に正規化して載せる", async () => {
+    mkdirSync(join(dir, ".claude", "backlog-agent-sync"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "backlog-agent-sync", "project.json"),
+      JSON.stringify({ projectId: 1 }), "utf8");
+    const { deps } = await buildRuntime(dir);
+    expect(deps.judgment).toEqual({ backend: "auto", model: undefined });
+  });
+
+  it("project.json 不在でも judgment は既定 backend=auto で載る", async () => {
+    const { deps } = await buildRuntime(dir);
+    expect(deps.judgment).toMatchObject({ backend: "auto" });
+  });
+
+  // ---- 修正(b): getIssueId を deps へ注入（rest.getIssue 経由・失敗時 undefined） ----
+
+  it("deps.getIssueId を注入し rest.getIssue 経由でキー→数値 id を解決する", async () => {
+    const { deps, rest } = await buildRuntime(dir);
+    expect(deps.getIssueId).toBeTypeOf("function");
+    // rest.getIssue をスタブして注入関数の配線を確認（ネットワークは張らない）
+    (rest as any).getIssue = async (key: string) => ({ id: 4242, issueKey: key });
+    await expect(deps.getIssueId!("PROJ-9")).resolves.toBe(4242);
+  });
+
+  it("getIssueId は rest.getIssue 失敗時に undefined を返す（沈黙 no-op の素材）", async () => {
+    const { deps, rest } = await buildRuntime(dir);
+    (rest as any).getIssue = async () => { throw new Error("404"); };
+    await expect(deps.getIssueId!("PROJ-404")).resolves.toBeUndefined();
+  });
+
+  it("getIssueId は失敗時に理由（キー+メッセージ）を 1 行 stderr へ出す（観測性）", async () => {
+    const { deps, rest } = await buildRuntime(dir);
+    (rest as any).getIssue = async () => { throw new Error("404 Not Found"); };
+    const written: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr.write as any) = (s: string) => { written.push(String(s)); return true; };
+    try {
+      await expect(deps.getIssueId!("PROJ-404")).resolves.toBeUndefined();
+    } finally {
+      (process.stderr.write as any) = orig;
+    }
+    const line = written.join("");
+    expect(line).toContain("課題id解決に失敗");
+    expect(line).toContain("PROJ-404"); // 対象キー
+    expect(line).toContain("404 Not Found"); // 失敗理由
+    expect(line.endsWith("\n")).toBe(true); // 1 行（改行終端）
+  });
 });

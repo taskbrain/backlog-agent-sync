@@ -4,6 +4,8 @@ import { RateLimiter, type RateCategory } from "./rate-limiter.js";
 export interface IssueRef { id: number; issueKey: string; }
 /** findIssues の詳細付き結果（既存呼出に対し後方互換の optional 拡張）。 */
 export interface FoundIssue extends IssueRef { summary?: string; status?: string; updated?: string; }
+/** GET /issues/:key の本文付き詳細（backfill-summary が既存説明を読むために使う）。 */
+export interface IssueDetail extends IssueRef { summary: string; description: string; }
 export interface IssueComment { id: number; content: string; createdUser: { id: number; name: string }; created: string; }
 export interface StatusDef { id: number; name: string; }
 export interface IssueTypeDef { id: number; name: string; }
@@ -122,6 +124,24 @@ export class BacklogRest {
     return { id: r.id, projectKey: r.projectKey, name: r.name };
   }
 
+  /**
+   * 既存課題の数値 id 解決（GET /issues/:idOrKey はキーでも数値 id でも引ける）。
+   * 逸脱検知の親子化で任意キー（child 孫世代 / sibling 親あり）の id を得るために使う。
+   */
+  async getIssue(issueIdOrKey: string | number): Promise<IssueRef> {
+    const r = await this.request("GET", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "read");
+    return { id: r.id, issueKey: r.issueKey };
+  }
+
+  /**
+   * 既存課題の本文付き詳細（件名・説明）を取得する。getIssue は id/key のみを返すため、
+   * backfill-summary が既存説明を読み材料にする用途で別メソッドとして提供する（既存契約は不変）。
+   */
+  async getIssueDetail(issueIdOrKey: string | number): Promise<IssueDetail> {
+    const r = await this.request("GET", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "read");
+    return { id: r.id, issueKey: r.issueKey, summary: String(r.summary ?? ""), description: String(r.description ?? "") };
+  }
+
   async getProjectStatuses(projectKey: string): Promise<StatusDef[]> {
     return this.request("GET", `/projects/${encodeURIComponent(projectKey)}/statuses`, "read");
   }
@@ -202,6 +222,19 @@ export class BacklogRest {
   async updateIssue(input: UpdateIssueInput): Promise<void> {
     const { issueIdOrKey, ...rest } = input;
     await this.request("PATCH", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "write", rest as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * 既存課題の後付け親子化（PATCH /issues/:key に parentIssueId を送る）。
+   * Backlog API v2 で永続化されることを実機確認済み（Phase 2 ライフサイクル配線で使用）。
+   */
+  async setParent(issueIdOrKey: string | number, parentIssueId: number): Promise<void> {
+    await this.request("PATCH", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "write", { parentIssueId });
+  }
+
+  /** 既存課題の説明文だけを後付け更新（PATCH /issues/:key に description を送る）。 */
+  async updateIssueDescription(issueIdOrKey: string | number, description: string): Promise<void> {
+    await this.request("PATCH", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "write", { description });
   }
 
   async addComment(issueIdOrKey: string | number, content: string): Promise<void> {

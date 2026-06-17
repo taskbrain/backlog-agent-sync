@@ -25,6 +25,8 @@ function promptEv(prompt: string) {
 }
 
 const deps = { projectId: 10, issueTypeId: 4236190, priorityId: 3 };
+// 逸脱検知テストは決定論 backend を明示注入し、claude CLI 起動（非決定/低速）を避ける。
+const detDeps = { ...deps, judgment: { backend: "deterministic" as const } };
 
 describe("runUserPromptSubmit", () => {
   it("初回プロンプトで課題を作成: タイトル=1行目、説明=全文+メタ+マーカー", async () => {
@@ -220,5 +222,190 @@ describe("runUserPromptSubmit", () => {
     expect(summarize).not.toHaveBeenCalled();
     expect(adapter.createIssue).toHaveBeenCalledOnce(); // 課題作成は通常どおり
     expect(adapter.updateDescription).not.toHaveBeenCalled();
+  });
+
+  // ---- Wave2 Task2.2: 逸脱検知配線 ----
+
+  it("初回課題作成時に originalTask=初回プロンプト / progress=[] / activeIssueKey をセットする", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    await runUserPromptSubmit(promptEv("ログインバグを直して"), { store, adapter: adapter as any, ...deps });
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-100");
+    expect(st.originalTask).toBe("ログインバグを直して");
+    expect(st.progress).toEqual([]);
+  });
+
+  it("2回目以降・継続依頼（in_scope）では新課題を作成しない（active 不変）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正を行う";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    // 原タスクと語彙が重なる継続依頼 → 決定論 backend は in_scope
+    await runUserPromptSubmit(promptEv("ログイン機能のテストも追加して"), { store, adapter: adapter as any, ...detDeps });
+    expect(adapter.createIssue).not.toHaveBeenCalled();
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-1");
+  });
+
+  it("2回目以降・明示『別件』（independent）で新課題を作成し active を切替・originalTask 更新・progress リセット", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = ["着手"];
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockResolvedValue({ id: 200, issueKey: "PROJ-200" });
+    await runUserPromptSubmit(promptEv("別件: ドキュメントの章立てを整備したい"), { store, adapter: adapter as any, ...detDeps });
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-200"); // 新トピックへ切替
+    expect(st.parentIssueKey).toBeUndefined();
+    expect(st.originalTask).toBe("別件: ドキュメントの章立てを整備したい");
+    expect(st.progress).toEqual([]); // リセット
+  });
+
+  it("2回目以降・『サブタスク』（child）で子課題を作成し state.issueId で親 id を解決・相互リンク・active を子へ", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 555; // getIssueId 未注入 → state.issueId で解決される
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockResolvedValue({ id: 201, issueKey: "PROJ-201" });
+    await runUserPromptSubmit(promptEv("サブタスク: 入力バリデーションを追加したい"), { store, adapter: adapter as any, ...detDeps });
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    const input = adapter.createIssue.mock.calls[0][0];
+    expect(input.parentIssueId).toBe(555); // state.issueId 経由で親 id 解決
+    const targets = adapter.addComment.mock.calls.map((c) => String(c[0]));
+    expect(targets).toContain("PROJ-1"); // 親へ相互リンク
+    expect(targets).toContain("PROJ-201"); // 子へ相互リンク
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-201");
+    expect(st.parentIssueKey).toBe("PROJ-1");
+    expect(st.childIssueKeys).toContain("PROJ-201");
+  });
+
+  it("逸脱検知中の例外はプロンプト処理を止めない（非ブロッキング）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockRejectedValue(new Error("network down"));
+    await expect(
+      runUserPromptSubmit(promptEv("別件: 全く無関係な新規作業を開始"), { store, adapter: adapter as any, ...detDeps }),
+    ).resolves.toEqual({});
+    const st = await store.loadOrCreate("s1");
+    expect(st.lastPrompt).toContain("別件"); // 記録は維持
+  });
+
+  // ---- 修正(a): deps.judgment が判定 backend 選択に効く ----
+
+  it("deps.judgment=deterministic を渡すと決定論 backend で分類する（claude CLI を起動しない）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正を行う";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    // judgment={backend:"deterministic"} を deps に載せる → 決定論で in_scope 判定（新課題作成なし・active 不変）。
+    // 決定論 backend が選ばれていれば claude CLI 起動なしで即時・同期に結論が出る。
+    await runUserPromptSubmit(promptEv("ログイン機能のテストも追加して"), {
+      store, adapter: adapter as any, ...deps, judgment: { backend: "deterministic" },
+    });
+    expect(adapter.createIssue).not.toHaveBeenCalled();
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-1");
+  });
+
+  // ---- 修正(b): 任意キー（active ≠ セッション主課題）が deps.getIssueId で解決される ----
+
+  it("active が主課題と異なる child 孫世代でも deps.getIssueId で親 id を解決して子課題を作る", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; // セッション主課題
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-50"; // active は主課題ではない（孫世代）→ state.issueId では解決不可
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockResolvedValue({ id: 600, issueKey: "PROJ-600" });
+    // getIssueId は任意キー（PROJ-50）→ 数値 id を返す
+    const getIssueId = vi.fn(async (key: string) => (key === "PROJ-50" ? 5050 : undefined));
+    await runUserPromptSubmit(promptEv("サブタスク: 入力バリデーションを追加したい"), {
+      store, adapter: adapter as any, ...detDeps, getIssueId,
+    });
+    expect(getIssueId).toHaveBeenCalledWith("PROJ-50"); // 任意キーを解決
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    expect(adapter.createIssue.mock.calls[0][0].parentIssueId).toBe(5050); // getIssueId 経由の親 id
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-600");
+    expect(st.parentIssueKey).toBe("PROJ-50");
+  });
+
+  it("セッション主課題キーは state.issueId ショートカットで解決し getIssueId を呼ばない（REST 節約）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 777; // active=主課題 → ショートカットで解決
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockResolvedValue({ id: 601, issueKey: "PROJ-601" });
+    const getIssueId = vi.fn(async () => 9999);
+    await runUserPromptSubmit(promptEv("サブタスク: 入力バリデーションを追加したい"), {
+      store, adapter: adapter as any, ...detDeps, getIssueId,
+    });
+    expect(getIssueId).not.toHaveBeenCalled(); // ショートカット優先（REST を呼ばない）
+    expect(adapter.createIssue.mock.calls[0][0].parentIssueId).toBe(777); // state.issueId を使用
+  });
+
+  it("active が主課題と異なる child で getIssueId が解決失敗（undefined）なら新課題を作らず no-op", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-50"; // 主課題でない → ショートカット不可
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    const getIssueId = vi.fn(async () => undefined); // 解決失敗
+    await runUserPromptSubmit(promptEv("サブタスク: 入力バリデーションを追加したい"), {
+      store, adapter: adapter as any, ...detDeps, getIssueId,
+    });
+    expect(getIssueId).toHaveBeenCalledWith("PROJ-50");
+    expect(adapter.createIssue).not.toHaveBeenCalled(); // id 未解決 → no-op
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-50"); // 切替なし
   });
 });

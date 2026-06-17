@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import { normalizeAuto, readStdin } from "./events/normalize.js";
 import { runSessionStart } from "./lifecycle/session-start.js";
 import { runUserPromptSubmit } from "./lifecycle/user-prompt-submit.js";
@@ -7,6 +8,7 @@ import { runStop } from "./lifecycle/stop.js";
 import { runSessionEnd } from "./lifecycle/session-end.js";
 import type { LifecycleEvent } from "./types.js";
 import type { SeedLedger } from "./seed/apply.js";
+import type { JudgmentChoice } from "./init.js";
 
 export interface ParsedArgs {
   cmd: string;
@@ -18,11 +20,22 @@ export interface ParsedArgs {
   prune?: boolean;
   recreate?: boolean;
   target?: "wiki" | "documents";
+  /** init の判定モデル選択（--judgment）。未指定なら既存挙動（既存設定保持 → なければ auto）。 */
+  judgment?: JudgmentChoice;
+  /** backfill-summary の対象課題キー（位置引数）。 */
+  issueKey?: string;
+}
+
+/** --judgment の値を JudgmentChoice へ正規化（"auto" は "default" の別名）。不正値は undefined。 */
+function parseJudgmentChoice(v: string | undefined): JudgmentChoice | undefined {
+  if (v === "auto") return "default"; // auto = claude 既定モデル（backend=auto）
+  if (v === "default" || v === "haiku" || v === "sonnet" || v === "opus" || v === "fable" || v === "deterministic") return v;
+  return undefined;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd, ...rest] = argv;
-  const known = ["hook", "init", "seed", "pull", "status", "flush", "docs"];
+  const known = ["hook", "init", "seed", "pull", "status", "flush", "docs", "backfill-summary"];
   if (!cmd || !known.includes(cmd)) return { cmd: "help" };
   if (cmd === "hook") return { cmd, event: rest[0] as LifecycleEvent };
   if (cmd === "init") {
@@ -30,6 +43,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const i = rest.indexOf("--vcs");
     const v = i >= 0 ? rest[i + 1] : undefined;
     if (v === "github" || v === "backlog" || v === "generic") out.vcs = v;
+    const j = rest.indexOf("--judgment");
+    const choice = parseJudgmentChoice(j >= 0 ? rest[j + 1] : undefined);
+    if (choice) out.judgment = choice;
     return out;
   }
   if (cmd === "seed") {
@@ -51,7 +67,34 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (i >= 0 && rest[i + 1]) out.sessionId = rest[i + 1];
     return out;
   }
+  if (cmd === "backfill-summary") {
+    const out: ParsedArgs = { cmd, dryRun: rest.includes("--dry-run") };
+    // 課題キーは最初の非フラグ位置引数（--dry-run 等のフラグは除く）。
+    const key = rest.find((a) => !a.startsWith("--"));
+    if (key) out.issueKey = key;
+    return out;
+  }
   return { cmd };
+}
+
+// APIキー混入警告は 1 プロセス 1 回に抑制する（フック/CLI が複数回 main を呼んでも重複させない）。
+let apiKeyWarned = false;
+
+/** テスト用: 1回抑制フラグをリセットする。 */
+export function __resetApiKeyWarning(): void {
+  apiKeyWarned = false;
+}
+
+/**
+ * ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN が環境に存在する場合、judgment が API 従量課金を
+ * 回避するため決定論へフォールバックする旨を 1 回だけ警告する（告知のみ・ガードは judgment 側で実装済み）。
+ */
+export function warnIfApiKeyPresent(write: (s: string) => void = (s) => process.stderr.write(s)): void {
+  if (apiKeyWarned) return;
+  const hit = process.env.ANTHROPIC_API_KEY ? "ANTHROPIC_API_KEY" : process.env.ANTHROPIC_AUTH_TOKEN ? "ANTHROPIC_AUTH_TOKEN" : undefined;
+  if (!hit) return;
+  apiKeyWarned = true;
+  write(`backlog-sync: ${hit} が設定されています。claude -p がサブスクではなく API 従量課金になる恐れがあるため、判定は API 課金回避のため決定論にフォールバックします。\n`);
 }
 
 function emit(out: { additionalContext?: string }): void {
@@ -62,8 +105,12 @@ function emit(out: { additionalContext?: string }): void {
 
 export async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
+  // APIキー混入の告知（1回）。再帰起動された claude -p 子プロセス（BACKLOG_SYNC_IN_HOOK=1）では出さない。
+  if (!process.env.BACKLOG_SYNC_IN_HOOK) warnIfApiKeyPresent();
   if (parsed.cmd === "help") {
-    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic] [--judgment default|haiku|sonnet|opus|fable|deterministic|auto]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|backfill-summary <issueKey> [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    // --judgment の適用範囲を明示（判定モデルは逸脱検知/ターン要約のみ。初回プロンプト整理は固定 haiku で別軸）。
+    process.stdout.write("  --judgment: 判定モデルは逸脱検知/ターン要約に適用。初回プロンプト整理は固定 haiku（別軸・別段階）\n");
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
@@ -89,9 +136,16 @@ export async function main(argv: string[]): Promise<void> {
     const { buildRuntime } = await import("./runtime.js");
     const { deps, rest, projectKey } = await buildRuntime(cwd);
     const { runInit } = await import("./init.js");
+    // --judgment 指定時のみ選択を伝播（runInit は既存 project.json の judgment があれば selectJudgment を呼ばないため、
+    // 既存設定保持 → なければ選択 → 選択も無ければ auto、の優先順は runInit 側で担保される）。
+    const judgmentChoice = parsed.judgment;
     const res = await runInit(
       { cwd, projectKey, projectId: deps.projectId || undefined, vcsOverride: parsed.vcs },
-      { adapter: deps.adapter, rest },
+      {
+        adapter: deps.adapter,
+        rest,
+        ...(judgmentChoice ? { selectJudgment: async () => judgmentChoice } : {}),
+      },
     );
     process.stdout.write(`init OK: project=${projectKey} projectId=${res.projectId} user=${res.me.name} issueTypeId=${res.defaultIssueTypeId ?? "-"} priorityId=${res.defaultPriorityId ?? "-"} vcs=${res.vcs.kind} textFormattingRule=${res.textFormattingRule}\n`);
     for (const w of res.warnings) process.stdout.write(`WARN: ${w}\n`);
@@ -205,5 +259,55 @@ export async function main(argv: string[]): Promise<void> {
     }
     return;
   }
+  if (parsed.cmd === "backfill-summary") {
+    if (!parsed.issueKey) {
+      process.stderr.write("backlog-sync: backfill-summary には課題キーが必要です（例: backlog-sync backfill-summary PROJ-26 [--dry-run]）\n");
+      return;
+    }
+    const cwd = process.cwd();
+    const { buildRuntime } = await import("./runtime.js");
+    const { deps, rest } = await buildRuntime(cwd);
+    const { backfillSummary } = await import("./issue/backfill.js");
+    // REST/judgment を最小注入契約へ束ねる。読み取り（getIssueDetail/getComments）と
+    // 説明更新（updateIssueDescription）のみ。コメント削除・改変は配線上一切行わない。
+    const res = await backfillSummary(
+      {
+        getIssueDetail: (k) => rest.getIssueDetail(k),
+        getComments: (k, opts) => rest.getComments(k, opts),
+        updateIssueDescription: (k, body) => rest.updateIssueDescription(k, body),
+        judgment: deps.judgment,
+        textFormattingRule: deps.textFormattingRule,
+      },
+      parsed.issueKey,
+      { dryRun: parsed.dryRun },
+    );
+    if (parsed.dryRun) {
+      // dry-run 本文は backfillSummary が stdout へ出力済み。要約のみ stderr に。
+      process.stderr.write(`backfill-summary: ${res.issueKey} の説明本文をプレビュー（dry-run・未書込）\n`);
+    } else {
+      process.stdout.write(`backfill-summary: ${res.issueKey} の説明欄を現状サマリで再構築しました（コメントは非改変）\n`);
+    }
+    return;
+  }
   process.stdout.write(`backlog-sync: 不明なコマンド '${parsed.cmd}'\n`);
+}
+
+/**
+ * 直接実行（`node dist/cli.js <args>`）されたエントリかを判定する。
+ * - bin/backlog-sync は本モジュールを import して main を明示呼びするため、その時の argv[1] は
+ *   bin スクリプトのパス（= 本モジュール URL と不一致）→ false となり二重実行しない。
+ * - 直接 `node dist/cli.js` 実行時のみ argv[1] が本モジュールと一致 → true。
+ */
+export function isMainEntry(moduleUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  return moduleUrl === pathToFileURL(argv1).href;
+}
+
+// 直接実行時のみ main を起動（import 利用時＝bin 経由 / テストでは起動しない）。
+// 失敗時は bin と同じく非ブロッキング（理由を stderr へ出して exit 0）。
+if (isMainEntry(import.meta.url, process.argv[1])) {
+  main(process.argv.slice(2)).catch((err) => {
+    process.stderr.write(String((err && err.stack) || err) + "\n");
+    process.exit(0);
+  });
 }

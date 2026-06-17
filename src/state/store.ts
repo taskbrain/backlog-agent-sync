@@ -5,6 +5,9 @@ import type { SessionState, StatusMap, QueuedOp } from "../types.js";
 
 const DEFAULT_STATUS: StatusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
 
+/** 失敗 op の最大試行回数。到達した op は再キューせず破棄する（無限リトライ防止）。 */
+const MAX_ATTEMPTS = 5;
+
 export class StateStore {
   constructor(private readonly dir: string) {}
 
@@ -104,22 +107,59 @@ export class StateStore {
 
   /**
    * ハンドラが true を返した op を除去。false/throw は残置し attempts++。
-   * ハンドラ実行中に enqueue された op は失わない（ロック内で現在状態と突合）。
+   * 結果は op.id ではなくスナップショット配列内の index で突合する
+   * （同一 id の op が複数あっても各々独立に除去/残置するため）。
+   * ハンドラ実行中に enqueue された op は失わない: drain はロックを保持せずハンドラを呼ぶため、
+   * その間に enqueue（push）された op はスナップショットより後ろに追加される。よって先頭
+   * processedCount 件は index 整合が保たれ、index >= processedCount は drain 中追加分として無加工で残す。
+   * attempts が MAX_ATTEMPTS に達した失敗 op は再キューせず破棄し、破棄時に 1 回だけ警告する。
    */
   async drain(sessionId: string, handler: (op: QueuedOp) => Promise<boolean>): Promise<void> {
     const snapshot = await this.loadOrCreate(sessionId);
-    const results = new Map<string, QueuedOp | null>(); // id -> 置換(失敗) または null(除去)
+    const processedCount = snapshot.pendingQueue.length;
+    const results: boolean[] = []; // index -> 成功なら true（除去）、失敗なら false（残置 or 破棄）
     for (const op of snapshot.pendingQueue) {
-      const ok = await handler(op).catch(() => false);
-      results.set(op.id, ok ? null : { ...op, attempts: op.attempts + 1 });
+      results.push(await handler(op).catch(() => false));
     }
     await this.withLock(sessionId, (st) => {
-      st.pendingQueue = st.pendingQueue
-        .filter((op) => results.get(op.id) !== null) // 成功(null)は除去。未処理(undefined)/失敗は保持
-        .map((op) => {
-          const replacement = results.get(op.id);
-          return replacement ? replacement : op; // 失敗→attempts++、drain中に追加された新規op→そのまま
-        });
+      const next: QueuedOp[] = [];
+      st.pendingQueue.forEach((op, i) => {
+        if (i >= processedCount) {
+          next.push(op); // drain 中に enqueue された op（無加工で保持）
+          return;
+        }
+        if (results[i]) return; // 成功 → 除去
+        const attempts = op.attempts + 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          // 上限到達 → 破棄。再び見ることはないため警告はここで 1 回だけ。
+          process.stderr.write(
+            `backlog-sync: op を破棄しました（再試行上限 ${MAX_ATTEMPTS} 回到達）: id=${op.id} op=${op.op}\n`,
+          );
+          return;
+        }
+        next.push({ ...op, attempts });
+      });
+      st.pendingQueue = next;
     });
   }
+}
+
+// ---- アクティブ課題アクセサ（Wave2 のライフサイクル/Stop が共用。SessionState を直接操作） ----
+
+/** 現在アクティブな課題情報（未設定なら key=undefined）。 */
+export function getActiveIssue(st: SessionState): { key?: string; parentKey?: string; childKeys: string[] } {
+  return { key: st.activeIssueKey, parentKey: st.parentIssueKey, childKeys: st.childIssueKeys ?? [] };
+}
+
+/**
+ * アクティブ課題を設定する（withLock のコールバック内で SessionState を直接変更する用途）。
+ * childKeys 省略時は既存値を維持。parentKey は明示 undefined でクリア可。
+ */
+export function setActiveIssue(
+  st: SessionState,
+  active: { key: string; parentKey?: string; childKeys?: string[] },
+): void {
+  st.activeIssueKey = active.key;
+  st.parentIssueKey = active.parentKey;
+  if (active.childKeys !== undefined) st.childIssueKeys = active.childKeys;
 }

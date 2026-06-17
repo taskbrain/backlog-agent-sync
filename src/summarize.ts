@@ -1,15 +1,9 @@
-import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
+import { defaultExec, type ExecFn } from "./claude-p.js";
 
-export type ExecFn = (cmd: string, args: string[], opts: { timeout: number; cwd: string; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
-
-const defaultExec: ExecFn = (cmd, args, opts) =>
-  new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: opts.timeout, cwd: opts.cwd, env: opts.env, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve({ stdout: String(stdout) });
-    });
-  });
+// claude -p 低レベル実行（ExecFn/defaultExec）は src/claude-p.ts に一本化し DRY 化。
+// 既存 import 互換のため型を再公開する（test/summarize.test.ts が `type ExecFn` を本モジュールから取得）。
+export type { ExecFn } from "./claude-p.js";
 
 const SHORT_PROMPT_MAX = 80; // これ未満の単文は原文で十分（コスト/レイテンシ節約）
 const PROMPT_INPUT_MAX = 8000;
@@ -49,6 +43,10 @@ export function extractSummary(raw: string | undefined): string | undefined {
  * - 再帰防止: 子プロセスへ BACKLOG_SYNC_IN_HOOK=1 を付与（hook CLI 入口で即 return）
  * - cwd は os.tmpdir(): プロジェクトフックの誤発火と CLAUDE.md 読込を回避
  * - claude 不在（ENOENT）/ timeout / JSON parse 失敗 / 形式外出力 → undefined（例外を漏らさない）
+ *
+ * モデル軸の注意: ここでの入力整理は固定 haiku（低予算・初回プロンプトの体言止め整形のみ）。
+ * 逸脱検知/ターン要約の「判定モデル」は judgment.model 別軸であり、init で opus を選んでも
+ * この入力整理は haiku のまま（二重課金ではなく段階が別）。
  */
 export async function summarizeRequest(prompt: string, opts: { timeoutMs?: number; exec?: ExecFn } = {}): Promise<string | undefined> {
   const trimmed = prompt.trim();
@@ -59,6 +57,7 @@ export async function summarizeRequest(prompt: string, opts: { timeoutMs?: numbe
     const input = `${INSTRUCTION}\n\n---\n${trimmed.slice(0, PROMPT_INPUT_MAX)}`;
     const { stdout } = await exec(
       "claude",
+      // --model haiku は固定（入力整理＝低予算）。逸脱/サマリ判定の判定モデルは judgment.model 別軸で適用。
       ["-p", input, "--output-format", "json", "--max-turns", "1", "--model", "haiku"],
       {
         timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,

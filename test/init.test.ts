@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runInit } from "../src/init.js";
+import { runInit, judgmentFromChoice } from "../src/init.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "bas-")); });
@@ -192,5 +192,75 @@ describe("runInit（G19: vcs / textFormattingRule / フィールドキャッシ�
     const written = readWritten();
     expect(written.fieldRules).toEqual({ assignSelf: false, milestone: "current", categoryRules: { "フロントエンド": ["liff"] } });
     expect(written.customKey).toBe("keep-me"); // 未知キーも保持
+  });
+});
+
+describe("judgmentFromChoice（判定モデル選択 → JudgmentConfig 変換）", () => {
+  it("default は backend=auto・model 未設定（claude 既定モデル）", () => {
+    expect(judgmentFromChoice("default")).toEqual({ backend: "auto" });
+  });
+  it("haiku / sonnet / opus / fable は backend=auto + 当該 model", () => {
+    expect(judgmentFromChoice("haiku")).toEqual({ backend: "auto", model: "haiku" });
+    expect(judgmentFromChoice("sonnet")).toEqual({ backend: "auto", model: "sonnet" });
+    expect(judgmentFromChoice("opus")).toEqual({ backend: "auto", model: "opus" });
+    expect(judgmentFromChoice("fable")).toEqual({ backend: "auto", model: "fable" });
+  });
+  it("deterministic は決定論のみ（model なし）", () => {
+    expect(judgmentFromChoice("deterministic")).toEqual({ backend: "deterministic" });
+  });
+});
+
+describe("runInit（判定モデル選択 → project.json judgment）", () => {
+  it("selectJudgment が無ければ非対話既定 backend=auto を書く", async () => {
+    await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, baseDeps());
+    expect(readWritten().judgment).toEqual({ backend: "auto" });
+  });
+
+  it("selectJudgment の選択（haiku）を judgment へ保存する", async () => {
+    const selectJudgment = vi.fn().mockResolvedValue("haiku");
+    const deps = baseDeps({}, { selectJudgment });
+    const out = await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, deps);
+    expect(selectJudgment).toHaveBeenCalled();
+    expect(readWritten().judgment).toEqual({ backend: "auto", model: "haiku" });
+    expect(out.judgment).toEqual({ backend: "auto", model: "haiku" });
+  });
+
+  it("selectJudgment が deterministic を返したら backend=deterministic を保存する", async () => {
+    const deps = baseDeps({}, { selectJudgment: vi.fn().mockResolvedValue("deterministic") });
+    await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, deps);
+    expect(readWritten().judgment).toEqual({ backend: "deterministic" });
+  });
+
+  it("既存 project.json の judgment は保持し selectJudgment を呼ばない（init は既存設定尊重）", async () => {
+    const cfgDir = join(dir, ".claude", "backlog-agent-sync");
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(join(cfgDir, "project.json"), JSON.stringify({
+      judgment: { backend: "claude-p", model: "sonnet" },
+    }), "utf8");
+    const selectJudgment = vi.fn().mockResolvedValue("haiku");
+    const deps = baseDeps({}, { selectJudgment });
+    await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, deps);
+    expect(selectJudgment).not.toHaveBeenCalled();
+    expect(readWritten().judgment).toEqual({ backend: "claude-p", model: "sonnet" });
+  });
+
+  // ---- 修正(c): CLI --judgment が選択した値（selectJudgment 経由）の project.json への反映 ----
+
+  it("--judgment haiku 相当（selectJudgment→haiku）で judgment={backend:auto,model:haiku} を書く", async () => {
+    const deps = baseDeps({}, { selectJudgment: vi.fn().mockResolvedValue("haiku") });
+    const out = await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, deps);
+    expect(readWritten().judgment).toEqual({ backend: "auto", model: "haiku" });
+    expect(out.judgment).toEqual({ backend: "auto", model: "haiku" });
+  });
+
+  it("--judgment deterministic 相当（selectJudgment→deterministic）で judgment={backend:deterministic} を書く", async () => {
+    const deps = baseDeps({}, { selectJudgment: vi.fn().mockResolvedValue("deterministic") });
+    await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, deps);
+    expect(readWritten().judgment).toEqual({ backend: "deterministic" });
+  });
+
+  it("--judgment 未指定相当（selectJudgment 未注入）で従来既定 backend=auto を書く", async () => {
+    await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, baseDeps());
+    expect(readWritten().judgment).toEqual({ backend: "auto" });
   });
 });
