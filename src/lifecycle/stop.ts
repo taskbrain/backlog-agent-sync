@@ -119,7 +119,12 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
     if (flipStatus) s.lastStatus = "resolved";
   });
 
-  // drain は失敗 op を attempts++ で残置するため、オフラインでも例外を伝播しない
-  await store.drain(ev.sessionId, opDrainHandler(adapter, issueKey));
+  // drain は失敗 op を attempts++ で残置するため、オフラインでも例外を伝播しない。
+  // 同値 PATCH（Backlog code 7）の事前スキップ用に「このターン開始前」の既知ステータスを渡す。
+  // st は楽観更新前のスナップショット（行73 で load）なので st.lastStatus はターン開始前の値。
+  // 注: flipStatus=true（初回 resolved 遷移）では lastStatus は in_progress 等で resolved と非同値
+  // のため skip は発火せず setStatus が走る。既に resolved 済みの再 drain でのみ同値 skip が効く。
+  const currentStatusId = st.lastStatus ? st.statusMap[st.lastStatus] : undefined;
+  await store.drain(ev.sessionId, opDrainHandler(adapter, issueKey, currentStatusId));
   return {};
 }

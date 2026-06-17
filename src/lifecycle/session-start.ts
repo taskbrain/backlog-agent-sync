@@ -36,20 +36,40 @@ export function sessionMarker(sessionId: string): string {
   return `[[bas:session:${sessionId}]]`;
 }
 
+/** Backlog code 7 = 変更なし更新。同値ステータスへの PATCH で発生する。 */
+function isNoChangeError(e: unknown): boolean {
+  return /"code"\s*:\s*7\b/.test(String(e instanceof Error ? e.message : e));
+}
+
 /**
  * drain 用の共通 op ハンドラ（stop/subagent-stop/user-prompt-submit/session-end で共用）。
  * update_issue は resolutionId を持つ場合のみ 4 引数で渡す（id:0 の falsy 罠に注意し != null 判定）。
+ * currentStatusId（既知の現在ステータス）を渡すと、同値 PATCH を REST 呼出前にスキップして成功扱いにする。
+ * REST 呼出が code 7（変更なし）で失敗した場合も成功扱いで除去し、無限リトライを防ぐ。
  */
-export function opDrainHandler(adapter: TrackerAdapter, issueKey: string): (op: QueuedOp) => Promise<boolean> {
+export function opDrainHandler(
+  adapter: TrackerAdapter,
+  issueKey: string,
+  currentStatusId?: number,
+): (op: QueuedOp) => Promise<boolean> {
   return async (op) => {
     if (op.op === "add_comment") {
       await adapter.addComment(issueKey, String(op.payload.content));
       return true;
     }
     if (op.op === "update_issue") {
+      const statusId = Number(op.payload.statusId);
+      // (a) 既知の現在ステータスと同値なら REST を呼ばず成功扱い（status id は 0 もあり得るため != null 判定）
+      if (currentStatusId != null && statusId === currentStatusId) return true;
       const rid = op.payload.resolutionId;
-      if (rid != null) await adapter.setStatus(issueKey, Number(op.payload.statusId), undefined, Number(rid));
-      else await adapter.setStatus(issueKey, Number(op.payload.statusId), undefined);
+      try {
+        if (rid != null) await adapter.setStatus(issueKey, statusId, undefined, Number(rid));
+        else await adapter.setStatus(issueKey, statusId, undefined);
+      } catch (e) {
+        // (b) code 7（変更なし）は既適用済みとみなし成功扱い。それ以外は再 throw → attempts++ で残置
+        if (isNoChangeError(e)) return true;
+        throw e;
+      }
       return true;
     }
     return true;
