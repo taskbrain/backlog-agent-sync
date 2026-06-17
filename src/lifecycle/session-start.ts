@@ -1,4 +1,4 @@
-import type { CanonicalEvent, SessionState, QueuedOp, VcsConfig, TextFormattingRule, IssueFieldOverrides } from "../types.js";
+import type { CanonicalEvent, SessionState, QueuedOp, VcsConfig, TextFormattingRule, IssueFieldOverrides, JudgmentConfig } from "../types.js";
 import type { StateStore } from "../state/store.js";
 import type { TrackerAdapter } from "../tracker/adapter.js";
 import type { GitOps } from "../vcs/git.js";
@@ -23,6 +23,14 @@ export interface LifecycleDeps {
   git?: GitOps; // git 操作の DI（テスト用。無ければ実 git）
   // G20: 依頼プロンプトの LLM 整理（summarize.ts を束縛して注入。Claude セッションのみ呼ぶ判定は lifecycle 側）
   summarize?: (prompt: string) => Promise<string | undefined>;
+  // ---- Wave2 Task2.2: 逸脱検知→親子化（すべて optional・後方互換。未注入なら逸脱検知をスキップ） ----
+  /** 判定 backend の選択（project.json judgment）。getBackend() に渡す。未注入でも getBackend が既定を返す。 */
+  judgment?: JudgmentConfig;
+  /**
+   * 既存課題キー → 数値 id 解決（child/sibling-親あり の親子化に必要）。
+   * 未注入時は state.issueId（active がセッション主課題と一致する場合のみ）で解決する。
+   */
+  getIssueId?: (issueKey: string) => Promise<number | undefined>;
 }
 
 export interface HookOutput { additionalContext?: string; }

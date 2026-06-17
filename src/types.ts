@@ -62,6 +62,19 @@ export interface SessionState {
   activeIssueKey?: string; // 現在アクティブな課題キー（判定で切替。Wave2 が消費）
   parentIssueKey?: string; // activeIssueKey の親課題キー（子課題作成時に設定）
   childIssueKeys?: string[]; // この親の下に作成済みの子課題キー一覧
+  // ---- Wave2 Task2.2: 逸脱検知による構造化（後方互換 optional） ----
+  /**
+   * セッション最初の課題タスク（不変の本旨）。初回課題作成時にセットする。
+   * トピックが切り替わった（divergent/independent）ときは新トピックの依頼文へ更新される。
+   * Z(Stop担当）は構造化説明 ## タスク の素材として、および classifyDivergence の originalTask として消費する。
+   */
+  originalTask?: string;
+  /**
+   * 節目進捗（## 進捗 の素材。古い順・有界）。初回課題作成時に [] で初期化する。
+   * 新トピックへ切り替わった（divergent/independent）ときは [] にリセットする。
+   * Z(Stop担当）は updateSummary の isMilestone 時に appendMilestone で1行追加し、buildDescription({progress}) を再構築する。
+   */
+  progress?: string[];
 }
 
 export interface BacklogConfig {
