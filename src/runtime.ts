@@ -42,8 +42,12 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
     // project.json 未作成: env または未解決にフォールバック（judgment は既定 backend=auto のまま）
   }
   // 既存課題キー → 数値 id 解決（child 孫世代 / sibling 親あり の親子化に必要）。失敗は undefined（呼出側で no-op + skip ログ）。
+  // 挙動（失敗時 undefined）は維持しつつ、沈黙 catch を避け失敗理由を 1 行 stderr へ出して観測性を確保する。
   const getIssueId = (issueKey: string): Promise<number | undefined> =>
-    rest.getIssue(issueKey).then((i) => i.id).catch(() => undefined);
+    rest.getIssue(issueKey).then((i) => i.id).catch((e) => {
+      process.stderr.write(`backlog-sync: 課題id解決に失敗(${issueKey}): ${e?.message ?? e}\n`);
+      return undefined;
+    });
   const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest, vcs, textFormattingRule, resolutionFixedId, root: cwd, fields, summarize, judgment, getIssueId };
   return { deps, rest, projectKey: cfg.projectKey };
 }

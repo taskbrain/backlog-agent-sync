@@ -119,7 +119,51 @@ describe("updateSummary", () => {
     expect(r.isMilestone).toBe(false);
     expect(r.summary).toContain("既存");
   });
+
+  // ---- E2E-2: 空進捗+直後最新状況で 最新状況見出し/本文が進捗へ混入しない ----
+
+  it("空の ## 進捗 の直後に ## 最新状況 が続いても progress に見出しが混入しない", async () => {
+    const r = await backend.updateSummary(
+      input({
+        // 進捗ブロックが空のまま次見出し ## 最新状況 が直後に続くレイアウト（決定論経路で混入が起きるケース）
+        currentSummary: "## タスク\nログイン機能を実装する\n## 進捗\n## 最新状況\n調査中",
+        turnResult: "JWT 検証を直した",
+      }),
+    );
+    // 進捗ブロックに見出し行（`- ## 最新状況`）が混入しない（修正前は混入していた）
+    expect(r.summary).not.toContain("- ## 最新状況");
+    // 進捗ブロック本文（## 進捗 見出しの次行 〜 ## 最新状況 直前）を切り出す。
+    const progressBlock = progressBody(r.summary);
+    expect(progressBlock).not.toContain("調査中"); // 旧最新状況の本文が進捗へ漏れない
+    expect(progressBlock).not.toContain("##"); // 見出し（最新状況）が進捗へ混入しない
+    expect(progressBlock.trim()).toBe(""); // 空進捗は空のまま
+    // 最新状況は今ターンの結果で上書きされている
+    expect(r.summary).toContain("JWT 検証を直した");
+  });
+
+  it("中身のある進捗は最新状況見出しで正しく打ち切り、進捗項目はそのまま保持する", async () => {
+    const r = await backend.updateSummary(
+      input({
+        currentSummary: "## タスク\nT\n## 進捗\n- 設計完了\n- API 実装\n## 最新状況\n旧状況",
+        turnResult: "テスト追加中",
+      }),
+    );
+    const progressBlock = progressBody(r.summary);
+    expect(progressBlock).toContain("- 設計完了");
+    expect(progressBlock).toContain("- API 実装");
+    expect(progressBlock).not.toContain("旧状況"); // 最新状況本文は進捗へ漏れない
+    expect(progressBlock).not.toContain("##"); // 見出し混入なし
+  });
 });
+
+/** 構造化サマリから ## 進捗 ブロックの「本文のみ」（見出し行自身は含まない）を切り出す。 */
+function progressBody(summary: string): string {
+  const start = summary.indexOf("## 進捗");
+  if (start < 0) return "";
+  const afterHeading = summary.indexOf("\n", start) + 1; // 見出し行の次の行から
+  const end = summary.indexOf("## 最新状況", afterHeading);
+  return summary.slice(afterHeading, end < 0 ? undefined : end);
+}
 
 describe("isMilestone の過検知是正（#5: 完了/状態変更/分割/エラーに限定）", () => {
   // --- 偽陽性であってはならない（進行中＝false） ---

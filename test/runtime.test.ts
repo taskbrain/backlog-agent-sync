@@ -136,4 +136,22 @@ describe("buildRuntime", () => {
     (rest as any).getIssue = async () => { throw new Error("404"); };
     await expect(deps.getIssueId!("PROJ-404")).resolves.toBeUndefined();
   });
+
+  it("getIssueId は失敗時に理由（キー+メッセージ）を 1 行 stderr へ出す（観測性）", async () => {
+    const { deps, rest } = await buildRuntime(dir);
+    (rest as any).getIssue = async () => { throw new Error("404 Not Found"); };
+    const written: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr.write as any) = (s: string) => { written.push(String(s)); return true; };
+    try {
+      await expect(deps.getIssueId!("PROJ-404")).resolves.toBeUndefined();
+    } finally {
+      (process.stderr.write as any) = orig;
+    }
+    const line = written.join("");
+    expect(line).toContain("課題id解決に失敗");
+    expect(line).toContain("PROJ-404"); // 対象キー
+    expect(line).toContain("404 Not Found"); // 失敗理由
+    expect(line.endsWith("\n")).toBe(true); // 1 行（改行終端）
+  });
 });

@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import { normalizeAuto, readStdin } from "./events/normalize.js";
 import { runSessionStart } from "./lifecycle/session-start.js";
 import { runUserPromptSubmit } from "./lifecycle/user-prompt-submit.js";
@@ -108,6 +109,8 @@ export async function main(argv: string[]): Promise<void> {
   if (!process.env.BACKLOG_SYNC_IN_HOOK) warnIfApiKeyPresent();
   if (parsed.cmd === "help") {
     process.stdout.write("backlog-sync <init [--vcs github|backlog|generic] [--judgment default|haiku|sonnet|opus|fable|deterministic|auto]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|backfill-summary <issueKey> [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    // --judgment の適用範囲を明示（判定モデルは逸脱検知/ターン要約のみ。初回プロンプト整理は固定 haiku で別軸）。
+    process.stdout.write("  --judgment: 判定モデルは逸脱検知/ターン要約に適用。初回プロンプト整理は固定 haiku（別軸・別段階）\n");
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
@@ -287,4 +290,24 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
   process.stdout.write(`backlog-sync: 不明なコマンド '${parsed.cmd}'\n`);
+}
+
+/**
+ * 直接実行（`node dist/cli.js <args>`）されたエントリかを判定する。
+ * - bin/backlog-sync は本モジュールを import して main を明示呼びするため、その時の argv[1] は
+ *   bin スクリプトのパス（= 本モジュール URL と不一致）→ false となり二重実行しない。
+ * - 直接 `node dist/cli.js` 実行時のみ argv[1] が本モジュールと一致 → true。
+ */
+export function isMainEntry(moduleUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  return moduleUrl === pathToFileURL(argv1).href;
+}
+
+// 直接実行時のみ main を起動（import 利用時＝bin 経由 / テストでは起動しない）。
+// 失敗時は bin と同じく非ブロッキング（理由を stderr へ出して exit 0）。
+if (isMainEntry(import.meta.url, process.argv[1])) {
+  main(process.argv.slice(2)).catch((err) => {
+    process.stderr.write(String((err && err.stack) || err) + "\n");
+    process.exit(0);
+  });
 }

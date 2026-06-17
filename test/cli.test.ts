@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { parseArgs, main, warnIfApiKeyPresent, __resetApiKeyWarning } from "../src/cli.js";
+import { pathToFileURL } from "node:url";
+import { parseArgs, main, warnIfApiKeyPresent, __resetApiKeyWarning, isMainEntry } from "../src/cli.js";
 
 describe("parseArgs", () => {
   it("hook session-start を解釈する", () => {
@@ -126,6 +127,26 @@ describe("warnIfApiKeyPresent（APIキー混入の起動時警告）", () => {
     warnIfApiKeyPresent((s) => lines.push(s));
     warnIfApiKeyPresent((s) => lines.push(s));
     expect(lines.length).toBe(1);
+  });
+});
+
+describe("isMainEntry（直接実行ガード）", () => {
+  const MODULE_URL = "file:///abs/dist/cli.js";
+
+  it("argv[1] が本モジュールと一致すれば true（直接 node dist/cli.js 実行）", () => {
+    const argv1 = "/abs/dist/cli.js"; // パス → file URL に正規化すると MODULE_URL と一致
+    expect(isMainEntry(MODULE_URL, argv1)).toBe(true);
+    // 正規化が pathToFileURL と整合することも確認
+    expect(pathToFileURL(argv1).href).toBe(MODULE_URL);
+  });
+
+  it("argv[1] が bin スクリプトのパスなら false（bin が import→main 明示呼び＝二重実行しない）", () => {
+    // bin/backlog-sync 経由では argv[1] は bin のパス（dist/cli.js ではない）
+    expect(isMainEntry(MODULE_URL, "/abs/bin/backlog-sync")).toBe(false);
+  });
+
+  it("argv[1] が undefined なら false（起動文脈不明時は走らせない）", () => {
+    expect(isMainEntry(MODULE_URL, undefined)).toBe(false);
   });
 });
 

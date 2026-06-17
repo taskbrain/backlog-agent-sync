@@ -199,6 +199,14 @@ const TASK_RE = /(?:^|\n)#{1,6}\s*タスク\s*\n([\s\S]*?)(?=\n#{1,6}\s|\n\*{1,6
 const LATEST_RE = /(?:^|\n)#{1,6}\s*最新状況\s*\n([\s\S]*?)(?=\n#{1,6}\s|\n\*{1,6}\s|$)/;
 const PROGRESS_RE = /(?:^|\n)#{1,6}\s*進捗\s*\n([\s\S]*?)(?=\n#{1,6}\s|\n\*{1,6}\s|$)/;
 
+/**
+ * 構造見出し行（markdown `## ` / backlog `** ` 等）の検出。
+ * 空の ## 進捗 直後に ## 最新状況 が続くレイアウトでは PROGRESS_RE の非貪欲キャプチャが
+ * 次見出し行まで取り込みうる（決定論経路のみ・LLM 経路では非発生）。進捗行から見出しを
+ * 確実に打ち切る境界フィルタとして適用する（backfill.ts の STRUCT_HEADING_RE 同型）。
+ */
+const PROGRESS_HEADING_RE = /^\s*(?:#{1,6}|\*{1,6})\s+\S/;
+
 function extractTask(summary: string): string {
   const m = TASK_RE.exec(summary);
   return m ? m[1]!.trim() : "";
@@ -212,8 +220,13 @@ function extractLatest(summary: string): string {
 function extractProgress(summary: string): string[] {
   const m = PROGRESS_RE.exec(summary);
   if (!m) return [];
-  return m[1]!
-    .split(/\r?\n/)
+  const lines = m[1]!.split(/\r?\n/);
+  // 次の構造見出し行で打ち切る（見出し以降は別ブロックの内容＝進捗ではない）。
+  // 空進捗+直後最新状況のレイアウトでは PROGRESS_RE が見出し行とその本文まで取り込むため、
+  // 見出し行を境界として以降を捨てる（見出し自身も本文も progress へ混入させない）。
+  const headingIdx = lines.findIndex((l) => PROGRESS_HEADING_RE.test(l));
+  const body = headingIdx >= 0 ? lines.slice(0, headingIdx) : lines;
+  return body
     .map((l) => l.replace(/^[-*]\s+/, "").trim())
     .filter((l) => l.length > 0);
 }
