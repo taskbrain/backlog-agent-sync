@@ -3,9 +3,11 @@ import { buildDescription } from "../issue/description.js";
 
 /**
  * 決定論 backend（LLM 不使用・依存追加なし）。
- * - classifyDivergence: 原タスクとターン依頼の軽量類似度（語彙 Jaccard）で乖離判定。
+ * - classifyDivergence: 原タスクとターン依頼の軽量類似度（共有トークン数）で乖離判定。
  *   保守的閾値（明確に乖離した時のみ divergent）+ 明示キーワード優先。既定 in_scope でタスク乱立を防ぐ。
  * - updateSummary: ターン結果から最新状況を上書きし、状態語/完了語で isMilestone を立てる。
+ *   ※ isMilestone を返すだけで appendMilestone は呼ばない。進捗への反映（appendMilestone 呼出）は
+ *     呼び出し側（Phase2 の Stop 配線）の責務（updateSummary の docstring 参照）。
  */
 
 /** 明示的に「別作業」を宣言するキーワード（出現で divergent 寄り）。 */
@@ -14,25 +16,51 @@ const DIVERGENT_KEYWORDS = ["別タスク", "別件", "別の課題", "別課題
 /** 子課題（従属）を示唆するキーワード（relationship=child）。 */
 const CHILD_KEYWORDS = ["サブタスク", "子課題", "子タスク", "分割して", "別で進める"];
 
-/** マイルストーン（進捗 1 行追加）対象とみなす状態語/完了語。 */
+/**
+ * マイルストーン（進捗 1 行追加）対象とみなすキーワード。
+ * 過検知（コメント増殖）防止のため、**完了・状態変更・分割・エラー（=終端/節目）に限定**する。
+ * 進行中を示す語（裸の「修正」「fix」「マージ」「デプロイ」等）は含めない。
+ * - 完了: "修正している最中"/"fix中"/"マージ予定" は false、
+ *   "修正完了"/"デプロイ完了"/"マージ済み" は true になるよう、完了を伴う複合形のみを採る。
+ */
 const MILESTONE_KEYWORDS = [
+  // --- 完了 ---
   "完了",
-  "done",
   "完成",
-  "修正",
-  "デプロイ",
-  "deploy",
-  "リリース",
-  "release",
-  "マージ",
-  "merge",
-  "実装した",
+  "done",
   "対応済",
   "解決",
+  "実装完了",
+  "実装した",
+  "修正完了",
+  "修正した",
   "fixed",
-  "fix",
-  "passed",
-  "green",
+  // --- 状態変更（デプロイ/リリース/マージは「済/した/完了」を伴う複合形に限定） ---
+  "デプロイ済",
+  "デプロイした",
+  "デプロイ完了",
+  "deployed",
+  "リリース済",
+  "リリースした",
+  "リリース完了",
+  "released",
+  "マージ済",
+  "マージした",
+  "マージ完了",
+  "merged",
+  // --- 分割（課題分割は構造上の節目） ---
+  "分割した",
+  "別課題に切り出",
+  "別タスクに切り出",
+  "切り出した",
+  // --- エラー/中止/方針変更（終端・転換点） ---
+  "失敗",
+  "error",
+  "エラー",
+  "中止",
+  "方針変更",
+  "断念",
+  "ブロック",
 ];
 
 /**
@@ -74,6 +102,19 @@ export class DeterministicBackend implements JudgmentBackend {
     return { kind: "in_scope" };
   }
 
+  /**
+   * 最新状況を上書きした構造化サマリと isMilestone を返す。
+   *
+   * 責務境界（重要）: この関数は `isMilestone` を**判定して返すだけ**で、`appendMilestone` は呼ばない。
+   * isMilestone===true のとき進捗（## 進捗）へ 1 行追加する処理は、**呼び出し側（Phase2 の Stop 配線）の責務**。
+   * 典型的な配線は次の通り（このメソッドは進捗配列を持たないため、進捗の保持・有界化は呼び出し側が行う）:
+   *
+   *   const { summary, isMilestone } = await backend.updateSummary(input);
+   *   if (isMilestone) progress = appendMilestone(progress, <節目1行>, 20);
+   *   // 進捗を含めた最終本文は呼び出し側で buildDescription({ ..., progress }) を再構築する。
+   *
+   * ここで返す summary の ## 進捗 は currentSummary から引き継いだ既存値のみで、今ターンの節目は未反映。
+   */
   async updateSummary(input: JudgmentInput): Promise<SummaryUpdate> {
     const result = input.turnResult?.trim();
     const isMilestone = result ? hasKeyword(result, MILESTONE_KEYWORDS) : false;
