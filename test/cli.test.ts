@@ -68,6 +68,17 @@ describe("parseArgs", () => {
   it("docs --target の不正値は無視する（既定 wiki のまま）", () => {
     expect(parseArgs(["docs", "--target", "bogus"])).toEqual({ cmd: "docs", dryRun: false, prune: false, recreate: false });
   });
+  it("backfill-summary <issueKey> を解釈する", () => {
+    expect(parseArgs(["backfill-summary", "PROJ-26"])).toEqual({ cmd: "backfill-summary", dryRun: false, issueKey: "PROJ-26" });
+  });
+  it("backfill-summary <issueKey> --dry-run を解釈する（順序非依存）", () => {
+    expect(parseArgs(["backfill-summary", "PROJ-26", "--dry-run"])).toEqual({ cmd: "backfill-summary", dryRun: true, issueKey: "PROJ-26" });
+    expect(parseArgs(["backfill-summary", "--dry-run", "PROJ-26"])).toEqual({ cmd: "backfill-summary", dryRun: true, issueKey: "PROJ-26" });
+  });
+  it("backfill-summary はキー無し（--dry-run のみ）でも cmd を保持し issueKey は未設定", () => {
+    expect(parseArgs(["backfill-summary", "--dry-run"])).toEqual({ cmd: "backfill-summary", dryRun: true });
+    expect(parseArgs(["backfill-summary"])).toEqual({ cmd: "backfill-summary", dryRun: false });
+  });
 });
 
 describe("warnIfApiKeyPresent（APIキー混入の起動時警告）", () => {

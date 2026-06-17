@@ -21,6 +21,8 @@ export interface ParsedArgs {
   target?: "wiki" | "documents";
   /** init の判定モデル選択（--judgment）。未指定なら既存挙動（既存設定保持 → なければ auto）。 */
   judgment?: JudgmentChoice;
+  /** backfill-summary の対象課題キー（位置引数）。 */
+  issueKey?: string;
 }
 
 /** --judgment の値を JudgmentChoice へ正規化（"auto" は "default" の別名）。不正値は undefined。 */
@@ -32,7 +34,7 @@ function parseJudgmentChoice(v: string | undefined): JudgmentChoice | undefined 
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd, ...rest] = argv;
-  const known = ["hook", "init", "seed", "pull", "status", "flush", "docs"];
+  const known = ["hook", "init", "seed", "pull", "status", "flush", "docs", "backfill-summary"];
   if (!cmd || !known.includes(cmd)) return { cmd: "help" };
   if (cmd === "hook") return { cmd, event: rest[0] as LifecycleEvent };
   if (cmd === "init") {
@@ -62,6 +64,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const out: ParsedArgs = { cmd };
     const i = rest.indexOf("--session");
     if (i >= 0 && rest[i + 1]) out.sessionId = rest[i + 1];
+    return out;
+  }
+  if (cmd === "backfill-summary") {
+    const out: ParsedArgs = { cmd, dryRun: rest.includes("--dry-run") };
+    // 課題キーは最初の非フラグ位置引数（--dry-run 等のフラグは除く）。
+    const key = rest.find((a) => !a.startsWith("--"));
+    if (key) out.issueKey = key;
     return out;
   }
   return { cmd };
@@ -98,7 +107,7 @@ export async function main(argv: string[]): Promise<void> {
   // APIキー混入の告知（1回）。再帰起動された claude -p 子プロセス（BACKLOG_SYNC_IN_HOOK=1）では出さない。
   if (!process.env.BACKLOG_SYNC_IN_HOOK) warnIfApiKeyPresent();
   if (parsed.cmd === "help") {
-    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic] [--judgment default|haiku|sonnet|opus|fable|deterministic|auto]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic] [--judgment default|haiku|sonnet|opus|fable|deterministic|auto]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|backfill-summary <issueKey> [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
@@ -244,6 +253,36 @@ export async function main(argv: string[]): Promise<void> {
       });
       const after = (await deps.store.loadOrCreate(s.sessionId)).pendingQueue.length;
       process.stdout.write(`${s.sessionId}: 排出 ${before - after}/${before} 件（残 ${after}）\n`);
+    }
+    return;
+  }
+  if (parsed.cmd === "backfill-summary") {
+    if (!parsed.issueKey) {
+      process.stderr.write("backlog-sync: backfill-summary には課題キーが必要です（例: backlog-sync backfill-summary PROJ-26 [--dry-run]）\n");
+      return;
+    }
+    const cwd = process.cwd();
+    const { buildRuntime } = await import("./runtime.js");
+    const { deps, rest } = await buildRuntime(cwd);
+    const { backfillSummary } = await import("./issue/backfill.js");
+    // REST/judgment を最小注入契約へ束ねる。読み取り（getIssueDetail/getComments）と
+    // 説明更新（updateIssueDescription）のみ。コメント削除・改変は配線上一切行わない。
+    const res = await backfillSummary(
+      {
+        getIssueDetail: (k) => rest.getIssueDetail(k),
+        getComments: (k, opts) => rest.getComments(k, opts),
+        updateIssueDescription: (k, body) => rest.updateIssueDescription(k, body),
+        judgment: deps.judgment,
+        textFormattingRule: deps.textFormattingRule,
+      },
+      parsed.issueKey,
+      { dryRun: parsed.dryRun },
+    );
+    if (parsed.dryRun) {
+      // dry-run 本文は backfillSummary が stdout へ出力済み。要約のみ stderr に。
+      process.stderr.write(`backfill-summary: ${res.issueKey} の説明本文をプレビュー（dry-run・未書込）\n`);
+    } else {
+      process.stdout.write(`backfill-summary: ${res.issueKey} の説明欄を現状サマリで再構築しました（コメントは非改変）\n`);
     }
     return;
   }

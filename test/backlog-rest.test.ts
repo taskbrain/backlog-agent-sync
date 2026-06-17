@@ -268,6 +268,21 @@ describe("BacklogRest（Phase 2: 親子化 / 説明後付け）", () => {
     expect(ref).toEqual({ id: 4242, issueKey: "PROJ-9" });
   });
 
+  it("getIssueDetail は GET /issues/:key を呼び id/issueKey/summary/description を返す", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 4242, issueKey: "PROJ-9", summary: "肥大課題", description: "## タスク\n旧説明" }));
+    const rest = restWith(fetchMock);
+    const detail = await rest.getIssueDetail("PROJ-9");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v2/issues/PROJ-9");
+    expect(detail).toEqual({ id: 4242, issueKey: "PROJ-9", summary: "肥大課題", description: "## タスク\n旧説明" });
+  });
+
+  it("getIssueDetail は summary/description 欠落時に空文字へフォールバックする", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 1, issueKey: "PROJ-1" }));
+    const rest = restWith(fetchMock);
+    const detail = await rest.getIssueDetail("PROJ-1");
+    expect(detail).toEqual({ id: 1, issueKey: "PROJ-1", summary: "", description: "" });
+  });
+
   it("getIssue は数値 id 指定でも GET /issues/:id を呼ぶ", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 4242, issueKey: "PROJ-9" }));
     const rest = restWith(fetchMock);

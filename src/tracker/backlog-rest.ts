@@ -4,6 +4,8 @@ import { RateLimiter, type RateCategory } from "./rate-limiter.js";
 export interface IssueRef { id: number; issueKey: string; }
 /** findIssues の詳細付き結果（既存呼出に対し後方互換の optional 拡張）。 */
 export interface FoundIssue extends IssueRef { summary?: string; status?: string; updated?: string; }
+/** GET /issues/:key の本文付き詳細（backfill-summary が既存説明を読むために使う）。 */
+export interface IssueDetail extends IssueRef { summary: string; description: string; }
 export interface IssueComment { id: number; content: string; createdUser: { id: number; name: string }; created: string; }
 export interface StatusDef { id: number; name: string; }
 export interface IssueTypeDef { id: number; name: string; }
@@ -129,6 +131,15 @@ export class BacklogRest {
   async getIssue(issueIdOrKey: string | number): Promise<IssueRef> {
     const r = await this.request("GET", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "read");
     return { id: r.id, issueKey: r.issueKey };
+  }
+
+  /**
+   * 既存課題の本文付き詳細（件名・説明）を取得する。getIssue は id/key のみを返すため、
+   * backfill-summary が既存説明を読み材料にする用途で別メソッドとして提供する（既存契約は不変）。
+   */
+  async getIssueDetail(issueIdOrKey: string | number): Promise<IssueDetail> {
+    const r = await this.request("GET", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "read");
+    return { id: r.id, issueKey: r.issueKey, summary: String(r.summary ?? ""), description: String(r.description ?? "") };
   }
 
   async getProjectStatuses(projectKey: string): Promise<StatusDef[]> {
