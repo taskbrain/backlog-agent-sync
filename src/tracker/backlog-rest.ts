@@ -122,6 +122,15 @@ export class BacklogRest {
     return { id: r.id, projectKey: r.projectKey, name: r.name };
   }
 
+  /**
+   * 既存課題の数値 id 解決（GET /issues/:idOrKey はキーでも数値 id でも引ける）。
+   * 逸脱検知の親子化で任意キー（child 孫世代 / sibling 親あり）の id を得るために使う。
+   */
+  async getIssue(issueIdOrKey: string | number): Promise<IssueRef> {
+    const r = await this.request("GET", `/issues/${encodeURIComponent(String(issueIdOrKey))}`, "read");
+    return { id: r.id, issueKey: r.issueKey };
+  }
+
   async getProjectStatuses(projectKey: string): Promise<StatusDef[]> {
     return this.request("GET", `/projects/${encodeURIComponent(projectKey)}/statuses`, "read");
   }

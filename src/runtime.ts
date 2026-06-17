@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { resolveConfig, stateDirFor, projectConfigPath } from "./config.js";
+import { resolveConfig, stateDirFor, projectConfigPath, resolveJudgmentConfig } from "./config.js";
 import { StateStore } from "./state/store.js";
 import { BacklogRest } from "./tracker/backlog-rest.js";
 import { BacklogAdapter } from "./tracker/backlog-adapter.js";
@@ -22,6 +22,8 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
   let resolutionFixedId: number | undefined;
   let fields: LifecycleDeps["fields"];
   let summarize: LifecycleDeps["summarize"];
+  // judgment は project.json 未解決時も既定（backend=auto）へ正規化する（getBackend が常に有効な backend を受け取る）
+  let judgment: LifecycleDeps["judgment"] = resolveJudgmentConfig(undefined);
   try {
     const raw = await readFile(projectConfigPath(cwd), "utf8");
     const pj = JSON.parse(raw) as ProjectCache;
@@ -34,9 +36,14 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
     fields = (prompt) => resolveCreateFields(prompt, pj);
     // 依頼の LLM 整理は既定 ON（"off" で無効化）。Codex セッションで呼ばない判定は lifecycle 側（ev.tool）
     if (pj.fieldRules?.summarize !== "off") summarize = (prompt) => summarizeRequest(prompt);
+    // ユーザーが init で選んだ判定 backend/model を本番ハンドラ（user-prompt-submit / stop）へ伝播する
+    judgment = resolveJudgmentConfig(pj.judgment);
   } catch {
-    // project.json 未作成: env または未解決にフォールバック
+    // project.json 未作成: env または未解決にフォールバック（judgment は既定 backend=auto のまま）
   }
-  const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest, vcs, textFormattingRule, resolutionFixedId, root: cwd, fields, summarize };
+  // 既存課題キー → 数値 id 解決（child 孫世代 / sibling 親あり の親子化に必要）。失敗は undefined（呼出側で no-op + skip ログ）。
+  const getIssueId = (issueKey: string): Promise<number | undefined> =>
+    rest.getIssue(issueKey).then((i) => i.id).catch(() => undefined);
+  const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest, vcs, textFormattingRule, resolutionFixedId, root: cwd, fields, summarize, judgment, getIssueId };
   return { deps, rest, projectKey: cfg.projectKey };
 }

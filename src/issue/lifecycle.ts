@@ -101,7 +101,11 @@ export async function handleDivergence(
   if (relationship === "child") {
     // 子: 現 active 課題の子。現 active の数値 id 解決が前提（解決不可なら no-op）。
     const parentId = await deps.getIssueId(activeKey);
-    if (parentId == null) return;
+    // id 解決失敗時は無言で消えず stderr に1行残す（VEO バグ同型の沈黙消失を防止）。
+    if (parentId == null) {
+      process.stderr.write(`backlog-sync: id解決失敗で逸脱処理をスキップ: ${activeKey}\n`);
+      return;
+    }
     const ref = await deps.createIssue({
       projectId: deps.projectId,
       summary: label,
@@ -124,7 +128,11 @@ export async function handleDivergence(
     // 既存親エポックがある: その配下に子を1つ追加するだけ（再親子化不要）。
     const parentKey = st.parentIssueKey;
     const parentId = await deps.getIssueId(parentKey);
-    if (parentId == null) return;
+    // 既存親エポックの id 解決失敗時も無言で消えず stderr に1行残す（沈黙消失の防止）。
+    if (parentId == null) {
+      process.stderr.write(`backlog-sync: id解決失敗で逸脱処理をスキップ: ${parentKey}\n`);
+      return;
+    }
     const ref = await deps.createIssue({
       projectId: deps.projectId,
       summary: label,

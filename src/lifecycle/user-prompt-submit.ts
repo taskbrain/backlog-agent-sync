@@ -115,12 +115,14 @@ async function detectAndHandleDivergence(
   });
   if (divergence.kind === "in_scope") return;
 
-  // 既存課題キー → 数値 id 解決関数。state.issueId はセッション主課題（st.issueKey）の id。
+  // 既存課題キー → 数値 id 解決関数。
+  // セッション主課題（st.issueKey）の id は state 既知のためショートカット（REST 不要）。
+  // それ以外の任意キー（child 孫世代 / sibling 親あり）は deps.getIssueId（rest.getIssue）で解決する。
   const resolveIssueId = async (key: string): Promise<number | undefined> => {
-    if (deps.getIssueId) {
-      try { return await deps.getIssueId(key); } catch { /* fallthrough */ }
-    }
     if (key === st.issueKey && st.issueId != null) return st.issueId;
+    if (deps.getIssueId) {
+      try { return await deps.getIssueId(key); } catch { /* 解決失敗は undefined（lifecycle 側で skip ログ + no-op） */ }
+    }
     return undefined;
   };
 

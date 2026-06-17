@@ -317,4 +317,95 @@ describe("runUserPromptSubmit", () => {
     const st = await store.loadOrCreate("s1");
     expect(st.lastPrompt).toContain("別件"); // 記録は維持
   });
+
+  // ---- 修正(a): deps.judgment が判定 backend 選択に効く ----
+
+  it("deps.judgment=deterministic を渡すと決定論 backend で分類する（claude CLI を起動しない）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正を行う";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    // judgment={backend:"deterministic"} を deps に載せる → 決定論で in_scope 判定（新課題作成なし・active 不変）。
+    // 決定論 backend が選ばれていれば claude CLI 起動なしで即時・同期に結論が出る。
+    await runUserPromptSubmit(promptEv("ログイン機能のテストも追加して"), {
+      store, adapter: adapter as any, ...deps, judgment: { backend: "deterministic" },
+    });
+    expect(adapter.createIssue).not.toHaveBeenCalled();
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-1");
+  });
+
+  // ---- 修正(b): 任意キー（active ≠ セッション主課題）が deps.getIssueId で解決される ----
+
+  it("active が主課題と異なる child 孫世代でも deps.getIssueId で親 id を解決して子課題を作る", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1"; // セッション主課題
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-50"; // active は主課題ではない（孫世代）→ state.issueId では解決不可
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockResolvedValue({ id: 600, issueKey: "PROJ-600" });
+    // getIssueId は任意キー（PROJ-50）→ 数値 id を返す
+    const getIssueId = vi.fn(async (key: string) => (key === "PROJ-50" ? 5050 : undefined));
+    await runUserPromptSubmit(promptEv("サブタスク: 入力バリデーションを追加したい"), {
+      store, adapter: adapter as any, ...detDeps, getIssueId,
+    });
+    expect(getIssueId).toHaveBeenCalledWith("PROJ-50"); // 任意キーを解決
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    expect(adapter.createIssue.mock.calls[0][0].parentIssueId).toBe(5050); // getIssueId 経由の親 id
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-600");
+    expect(st.parentIssueKey).toBe("PROJ-50");
+  });
+
+  it("セッション主課題キーは state.issueId ショートカットで解決し getIssueId を呼ばない（REST 節約）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 777; // active=主課題 → ショートカットで解決
+      s.activeIssueKey = "PROJ-1";
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockResolvedValue({ id: 601, issueKey: "PROJ-601" });
+    const getIssueId = vi.fn(async () => 9999);
+    await runUserPromptSubmit(promptEv("サブタスク: 入力バリデーションを追加したい"), {
+      store, adapter: adapter as any, ...detDeps, getIssueId,
+    });
+    expect(getIssueId).not.toHaveBeenCalled(); // ショートカット優先（REST を呼ばない）
+    expect(adapter.createIssue.mock.calls[0][0].parentIssueId).toBe(777); // state.issueId を使用
+  });
+
+  it("active が主課題と異なる child で getIssueId が解決失敗（undefined）なら新課題を作らず no-op", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.activeIssueKey = "PROJ-50"; // 主課題でない → ショートカット不可
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    const getIssueId = vi.fn(async () => undefined); // 解決失敗
+    await runUserPromptSubmit(promptEv("サブタスク: 入力バリデーションを追加したい"), {
+      store, adapter: adapter as any, ...detDeps, getIssueId,
+    });
+    expect(getIssueId).toHaveBeenCalledWith("PROJ-50");
+    expect(adapter.createIssue).not.toHaveBeenCalled(); // id 未解決 → no-op
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-50"); // 切替なし
+  });
 });

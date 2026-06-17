@@ -243,4 +243,24 @@ describe("runInit（判定モデル選択 → project.json judgment）", () => {
     expect(selectJudgment).not.toHaveBeenCalled();
     expect(readWritten().judgment).toEqual({ backend: "claude-p", model: "sonnet" });
   });
+
+  // ---- 修正(c): CLI --judgment が選択した値（selectJudgment 経由）の project.json への反映 ----
+
+  it("--judgment haiku 相当（selectJudgment→haiku）で judgment={backend:auto,model:haiku} を書く", async () => {
+    const deps = baseDeps({}, { selectJudgment: vi.fn().mockResolvedValue("haiku") });
+    const out = await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, deps);
+    expect(readWritten().judgment).toEqual({ backend: "auto", model: "haiku" });
+    expect(out.judgment).toEqual({ backend: "auto", model: "haiku" });
+  });
+
+  it("--judgment deterministic 相当（selectJudgment→deterministic）で judgment={backend:deterministic} を書く", async () => {
+    const deps = baseDeps({}, { selectJudgment: vi.fn().mockResolvedValue("deterministic") });
+    await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, deps);
+    expect(readWritten().judgment).toEqual({ backend: "deterministic" });
+  });
+
+  it("--judgment 未指定相当（selectJudgment 未注入）で従来既定 backend=auto を書く", async () => {
+    await runInit({ cwd: dir, projectKey: "PROJ", projectId: 10 }, baseDeps());
+    expect(readWritten().judgment).toEqual({ backend: "auto" });
+  });
 });

@@ -39,6 +39,26 @@ describe("parseArgs", () => {
     expect(parseArgs(["init", "--vcs", "bogus"])).toEqual({ cmd: "init" });
     expect(parseArgs(["init", "--vcs"])).toEqual({ cmd: "init" });
   });
+  it("init --judgment を解釈する（haiku/sonnet/opus/fable/deterministic/default）", () => {
+    expect(parseArgs(["init", "--judgment", "haiku"])).toEqual({ cmd: "init", judgment: "haiku" });
+    expect(parseArgs(["init", "--judgment", "sonnet"])).toEqual({ cmd: "init", judgment: "sonnet" });
+    expect(parseArgs(["init", "--judgment", "opus"])).toEqual({ cmd: "init", judgment: "opus" });
+    expect(parseArgs(["init", "--judgment", "fable"])).toEqual({ cmd: "init", judgment: "fable" });
+    expect(parseArgs(["init", "--judgment", "deterministic"])).toEqual({ cmd: "init", judgment: "deterministic" });
+    expect(parseArgs(["init", "--judgment", "default"])).toEqual({ cmd: "init", judgment: "default" });
+  });
+  it("init --judgment auto は default の別名として解釈する", () => {
+    expect(parseArgs(["init", "--judgment", "auto"])).toEqual({ cmd: "init", judgment: "default" });
+  });
+  it("init --judgment の不正値/値なしは無視する（未指定 = 既存挙動）", () => {
+    expect(parseArgs(["init", "--judgment", "bogus"])).toEqual({ cmd: "init" });
+    expect(parseArgs(["init", "--judgment"])).toEqual({ cmd: "init" });
+    expect(parseArgs(["init"])).toEqual({ cmd: "init" });
+  });
+  it("init --vcs と --judgment を併用解釈する", () => {
+    expect(parseArgs(["init", "--vcs", "github", "--judgment", "haiku"]))
+      .toEqual({ cmd: "init", vcs: "github", judgment: "haiku" });
+  });
   it("docs を解釈する（--dry-run/--prune/--recreate/--target）", () => {
     expect(parseArgs(["docs"])).toEqual({ cmd: "docs", dryRun: false, prune: false, recreate: false });
     expect(parseArgs(["docs", "--dry-run", "--prune", "--recreate", "--target", "documents"]))

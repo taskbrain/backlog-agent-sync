@@ -7,6 +7,7 @@ import { runStop } from "./lifecycle/stop.js";
 import { runSessionEnd } from "./lifecycle/session-end.js";
 import type { LifecycleEvent } from "./types.js";
 import type { SeedLedger } from "./seed/apply.js";
+import type { JudgmentChoice } from "./init.js";
 
 export interface ParsedArgs {
   cmd: string;
@@ -18,6 +19,15 @@ export interface ParsedArgs {
   prune?: boolean;
   recreate?: boolean;
   target?: "wiki" | "documents";
+  /** init の判定モデル選択（--judgment）。未指定なら既存挙動（既存設定保持 → なければ auto）。 */
+  judgment?: JudgmentChoice;
+}
+
+/** --judgment の値を JudgmentChoice へ正規化（"auto" は "default" の別名）。不正値は undefined。 */
+function parseJudgmentChoice(v: string | undefined): JudgmentChoice | undefined {
+  if (v === "auto") return "default"; // auto = claude 既定モデル（backend=auto）
+  if (v === "default" || v === "haiku" || v === "sonnet" || v === "opus" || v === "fable" || v === "deterministic") return v;
+  return undefined;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -30,6 +40,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const i = rest.indexOf("--vcs");
     const v = i >= 0 ? rest[i + 1] : undefined;
     if (v === "github" || v === "backlog" || v === "generic") out.vcs = v;
+    const j = rest.indexOf("--judgment");
+    const choice = parseJudgmentChoice(j >= 0 ? rest[j + 1] : undefined);
+    if (choice) out.judgment = choice;
     return out;
   }
   if (cmd === "seed") {
@@ -85,7 +98,7 @@ export async function main(argv: string[]): Promise<void> {
   // APIキー混入の告知（1回）。再帰起動された claude -p 子プロセス（BACKLOG_SYNC_IN_HOOK=1）では出さない。
   if (!process.env.BACKLOG_SYNC_IN_HOOK) warnIfApiKeyPresent();
   if (parsed.cmd === "help") {
-    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic] [--judgment default|haiku|sonnet|opus|fable|deterministic|auto]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
     return;
   }
   if (parsed.cmd === "hook" && parsed.event) {
@@ -111,9 +124,16 @@ export async function main(argv: string[]): Promise<void> {
     const { buildRuntime } = await import("./runtime.js");
     const { deps, rest, projectKey } = await buildRuntime(cwd);
     const { runInit } = await import("./init.js");
+    // --judgment 指定時のみ選択を伝播（runInit は既存 project.json の judgment があれば selectJudgment を呼ばないため、
+    // 既存設定保持 → なければ選択 → 選択も無ければ auto、の優先順は runInit 側で担保される）。
+    const judgmentChoice = parsed.judgment;
     const res = await runInit(
       { cwd, projectKey, projectId: deps.projectId || undefined, vcsOverride: parsed.vcs },
-      { adapter: deps.adapter, rest },
+      {
+        adapter: deps.adapter,
+        rest,
+        ...(judgmentChoice ? { selectJudgment: async () => judgmentChoice } : {}),
+      },
     );
     process.stdout.write(`init OK: project=${projectKey} projectId=${res.projectId} user=${res.me.name} issueTypeId=${res.defaultIssueTypeId ?? "-"} priorityId=${res.defaultPriorityId ?? "-"} vcs=${res.vcs.kind} textFormattingRule=${res.textFormattingRule}\n`);
     for (const w of res.warnings) process.stdout.write(`WARN: ${w}\n`);

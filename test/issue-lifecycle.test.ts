@@ -187,4 +187,40 @@ describe("handleDivergence", () => {
     expect(deps.createIssue).not.toHaveBeenCalled();
     expect(st.activeIssueKey).toBe("PROJ-1");
   });
+
+  // ---- 修正(b): id 解決失敗時のスキップログ（沈黙消失の防止・VEO バグ同型） ----
+
+  it("child: id 解決失敗時に stderr へスキップlog（対象キー付き）を1行出す", async () => {
+    const st = baseState();
+    const deps = makeDeps({ getIssueId: vi.fn(async () => undefined) as any });
+    const div: Divergence = { kind: "divergent", relationship: "child", label: "サブ作業" };
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((s: any) => { writes.push(String(s)); return true; });
+    try {
+      await handleDivergence(deps, st, div, "サブタスク: 作業A");
+    } finally {
+      spy.mockRestore();
+    }
+    const log = writes.join("");
+    expect(log).toContain("id解決失敗で逸脱処理をスキップ");
+    expect(log).toContain("PROJ-1"); // 解決できなかった active キー
+  });
+
+  it("sibling（親あり）: 親エポックの id 解決失敗時に stderr へスキップlog（親キー付き）を出す", async () => {
+    const st = baseState({ activeIssueKey: "PROJ-2", parentIssueKey: "PROJ-100", childIssueKeys: ["PROJ-2"] });
+    const deps = makeDeps({ getIssueId: vi.fn(async () => undefined) as any });
+    const div: Divergence = { kind: "divergent", relationship: "sibling", label: "関連: ログ整備" };
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((s: any) => { writes.push(String(s)); return true; });
+    try {
+      await handleDivergence(deps, st, div, "ついでにログも整備したい");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(deps.createIssue).not.toHaveBeenCalled(); // 親 id 未解決 → no-op
+    const log = writes.join("");
+    expect(log).toContain("id解決失敗で逸脱処理をスキップ");
+    expect(log).toContain("PROJ-100"); // 解決できなかった親エポックキー
+    expect(st.activeIssueKey).toBe("PROJ-2"); // 切替なし
+  });
 });
