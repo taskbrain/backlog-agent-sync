@@ -173,6 +173,12 @@ interface JudgmentBackend {
 
 スパイクは実装プランの最初のフェーズで実施し、結果を本設計に反映してから本実装へ進む。
 
+### スパイク結果と方針確定(2026-06-18)
+- **S2 = 可**: `PATCH /api/v2/issues/<key>` の `parentIssueId` で既存課題の後付け再親子化が可能(HTTP200・永続化・親フィルタ取得を実機確認)。§8 の縮退は不要。
+- **S1/S3 = 不可**: `prompt` フックは発火するが判定結果を私たちのコードへ受け渡す経路が無い(allow/blockゲートとして内部消費)。追加検証した `agent` フックも subagent が read-only(Write/Bash不可)で state へ書き戻せない。**= フック経由のサブスク内LLM判定は不可能**。
+- **確定方針(ユーザー承認)**: 判定 backend は「**ガード付き `claude -p` 側呼び出し + 決定論フォールバック**」。claude -p が判定結果を既知パスへ書き、決定論コードが読む。ガード: ①`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` 検出時は課金回避で claude -p を使わず決定論へ ②claude -p 失敗/タイムアウト/将来不可時も決定論へ自動フォールバック ③再帰ガード `BACKLOG_SYNC_IN_HOOK=1`。判定モデルは init で選択(haiku/sonnet/opus/fable/default)。Phase1の決定論 backend がフォールバック層。
+- これに伴い §9 の「claude -p 撤廃」は「**ガード付き利用 + 決定論フォールバック**」へ更新(完全撤廃ではなく、安全に使えるときだけ使い、不可時は劣化動作)。G20 の既存 claude -p 要約は判定 backend へ統合。
+
 ## 14. エラー処理・テスト・分離
 
 - **エラー処理**: 判定 backend のタイムアウト/失敗は副 backend へフォールバックし、同期自体は止めない(フロアの REST は best-effort、失敗は state にキューして次回 drain)。
