@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { CanonicalEvent, ActivityEntry } from "../types.js";
 import { ensureSessionIssue, opDrainHandler, type LifecycleDeps, type HookOutput } from "./session-start.js";
 import { FILE_TOOLS } from "./post-tool.js";
@@ -58,6 +59,10 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
   }
   if (!ensured) return {};
 
+  // ensureSessionIssue は遅延作成時に永続 state の lastStatus を in_progress にするが、呼出元スナップショット
+  // (st) には反映しない。F3 の同値スキップ判定が古い lastStatus を見て無駄な PATCH を積まないよう再読込する。
+  st.lastStatus = (await store.loadOrCreate(ev.sessionId)).lastStatus;
+
   // 同期先 = 逸脱分割後のアクティブ課題。未分割時はセッション主課題（ensureSessionIssue の戻り）。
   const active = getActiveIssue(st);
   const syncKey = active.key ?? ensured;
@@ -98,12 +103,20 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
     deps.textFormattingRule ?? "markdown",
   ).slice(0, BODY_MAX);
 
-  // 説明欄更新は耐久キューを介さず直接呼ぶ（buildDescription が常に全体を再構築するため、
-  // 失敗してもターン次第で自己修復する。非ブロッキングのため失敗は握り潰す）。
-  try {
-    await adapter.updateDescription(syncKey, body);
-  } catch {
-    // オフライン/権限等の失敗はセッションを止めない（次ターンの説明更新で回復）
+  // F4: 説明欄の差分スキップ。本文が前回 PATCH と同一なら updateDescription を呼ばない
+  // （無変更ターンの説明変更ログ＝活動ノイズを抑制）。不一致時のみ PATCH し、成功時にハッシュを更新する。
+  const bodyHash = createHash("sha256").update(body).digest("hex");
+  const descriptionChanged = st.lastDescriptionHash !== bodyHash;
+  let descriptionPatched = false;
+  if (descriptionChanged) {
+    // 説明欄更新は耐久キューを介さず直接呼ぶ（buildDescription が常に全体を再構築するため、
+    // 失敗してもターン次第で自己修復する。非ブロッキングのため失敗は握り潰す）。
+    try {
+      await adapter.updateDescription(syncKey, body);
+      descriptionPatched = true; // 成功時のみハッシュを更新（失敗時は次ターンで再 PATCH させる）
+    } catch {
+      // オフライン/権限等の失敗はセッションを止めない（次ターンの説明更新で回復）
+    }
   }
 
   // 節目コメントは isMilestone の時だけ 1 件（耐久キュー経由。従来のターン毎 add_comment は撤去）。
@@ -117,17 +130,17 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
     });
   }
 
-  // 状態遷移（処理中⇄処理済み）は維持。同値ステータス PATCH は Backlog が code 7 で拒否するため
-  // resolved 済みならスキップ（Phase1 の no-op スキップ）。
-  const flipStatus = st.lastStatus !== "resolved";
-  if (flipStatus) {
-    const payload: Record<string, unknown> = { statusId: st.statusMap.resolved };
-    // 完了理由を同一 PATCH で送信（resolutionFixedId=0「対応済み」が有効値のため != null 判定）
-    if (deps.resolutionFixedId != null) payload.resolutionId = deps.resolutionFixedId;
+  // F3: status トグル廃止。作業中は「処理中」を維持し、毎ターンの 処理中⇄処理済み 往復をしない。
+  // 「処理済み」への遷移は SessionEnd（セッション終了時）で1回だけ行う。
+  // status は実際に変化する場合のみ PATCH する（既に in_progress なら no-op スキップ＝活動ノイズ抑制）。
+  const toInProgress = st.lastStatus !== "in_progress";
+  if (toInProgress) {
+    const payload: Record<string, unknown> = { statusId: st.statusMap.in_progress };
     await store.enqueue(ev.sessionId, { id: `stop-status:${ev.sessionId}:${turn}`, op: "update_issue", payload, attempts: 0 });
   }
 
-  // 状態の永続化: バッファ/lastPrompt/lastPromptSummary/turnStartHead クリア、progress 更新、turnCount/lastStatus。
+  // 状態の永続化: バッファ/lastPrompt/lastPromptSummary/turnStartHead クリア、progress 更新、
+  // turnCount/lastStatus/lastDescriptionHash。
   await store.withLock(ev.sessionId, (s) => {
     s.activityBuffer = [];
     s.lastPrompt = undefined;
@@ -135,7 +148,8 @@ export async function runStop(ev: CanonicalEvent, deps: LifecycleDeps): Promise<
     s.turnStartHead = undefined;
     s.turnCount = turn;
     if (isMilestone) s.progress = nextProgress;
-    if (flipStatus) s.lastStatus = "resolved";
+    if (toInProgress) s.lastStatus = "in_progress"; // F3: 作業中は in_progress 維持（resolved 往復しない）
+    if (descriptionPatched) s.lastDescriptionHash = bodyHash; // F4: PATCH 成功時のみ差分ハッシュ更新
   });
 
   // drain は失敗 op を attempts++ で残置するため、オフラインでも例外を伝播しない。
