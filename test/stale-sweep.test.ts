@@ -111,6 +111,16 @@ describe("sweepStaleIssues", () => {
     expect(saved.lastStatus).toBe("resolved");
   });
 
+  it("引用符なしの code: 7 形式でも成功扱いで印を付ける", async () => {
+    const file = writeState("c7raw", { issueKey: "PROJ-6B", lastStatus: "in_progress" }, 48);
+    const rest = { setStatus: vi.fn().mockRejectedValue(new Error("Backlog PATCH -> 400 errors: [{ code: 7, message: No change }]")) };
+    const { swept } = await sweepStaleIssues(baseDeps(rest), "current");
+    expect(swept).toEqual(["PROJ-6B"]); // 引用符なしでも code7 は成功扱い
+    const saved = JSON.parse(readFileSync(file, "utf8")) as SessionState;
+    expect(saved.staleSwept).toBe(true);
+    expect(saved.lastStatus).toBe("resolved");
+  });
+
   it("transient な失敗では印を付けない（次回 SessionStart で再試行）", async () => {
     const file = writeState("net", { issueKey: "PROJ-7", lastStatus: "in_progress" }, 48);
     const rest = { setStatus: vi.fn().mockRejectedValue(new Error("network ECONNRESET")) };

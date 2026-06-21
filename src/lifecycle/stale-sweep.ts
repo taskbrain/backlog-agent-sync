@@ -28,9 +28,13 @@ export interface StaleSweepDeps {
   warn?: (msg: string) => void;
 }
 
-/** Backlog code 7 = 変更なし更新。既に resolved の課題へ PATCH したときに返る（既適用＝成功扱い）。 */
+/**
+ * Backlog code 7 = 変更なし更新。既に resolved の課題へ PATCH したときに返る（既適用＝成功扱い）。
+ * 引用符の有無・空白の揺れ（`"code":7` / `code: 7` 等）に耐える。code7 を取りこぼすと
+ * 毎 SessionStart で無限に no-op リトライされ続けるため、判定は緩めに保つ。
+ */
 function isNoChangeError(e: unknown): boolean {
-  return /"code"\s*:\s*7\b/.test(String(e instanceof Error ? e.message : e));
+  return /"?code"?\s*:\s*7\b/.test(String(e instanceof Error ? e.message : e));
 }
 
 /** state ファイルの原子的上書き（StateStore.save と同じ temp→rename 方式）。 */
@@ -101,6 +105,11 @@ export async function sweepStaleIssues(
     if (!st.issueKey) continue; // 課題未作成 → 対象外
     if (st.lastStatus === "resolved") continue; // 既に解決 → 対象外
     if (st.staleSwept) continue; // 既スイープ → 二重処理防止
+    // stale 判定は state ファイルの mtime と threshold（既定 24h）に基づく。state は
+    // UserPromptSubmit / PostToolUse / Stop で更新されるため稼働中セッションは安全だが、
+    // 同一 cwd で threshold を超えて完全アイドル（state 書込ゼロ）のまま生存するセッションは
+    // crash と区別できず解消され得る（再開時に Stop が「処理中」へ戻すため実害は軽微＝1 回の
+    // status 変化のみ）。threshold を小さくするとこのリスクが上がる。
     if (!(deps.now - mtimeMs > deps.thresholdMs)) continue; // まだ放置でない（最近更新）→ 対象外
 
     try {
