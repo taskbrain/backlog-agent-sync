@@ -4,6 +4,7 @@ import { defaultGitOps } from "../vcs/git.js";
 import { getBackend } from "../judgment/index.js";
 import { handleDivergence, type DivergenceDeps } from "../issue/lifecycle.js";
 import { getActiveIssue } from "../state/store.js";
+import { deriveOriginalTask, isRealUserPrompt } from "../issue/original-task.js";
 
 /**
  * UserPromptSubmit: 初回プロンプトで課題を作成し、LLM 整理に成功したら説明を v3 へ更新。
@@ -49,26 +50,24 @@ export async function runUserPromptSubmit(ev: CanonicalEvent, deps: LifecycleDep
 
   try {
     if (!st.issueKey) {
-      // 初回プロンプト: 課題を即時作成（原文ベースの説明。init 未解決時は undefined で no-op）
+      // 初回プロンプト: 課題を即時作成（原文ベースの説明。init 未解決時は undefined で no-op）。
+      // activeIssueKey / originalTask / progress の seed は ensureSessionIssue 側で
+      // 全経路（UserPromptSubmit / Stop 遅延作成）共通に行う（G23 改訂 F1: 主因修正）。
       const issueKey = await ensureSessionIssue(ev, deps, st);
       // LLM 整理に成功していれば、説明を v3（まとめ直し主役 + 元プロンプト別枠）へ更新。
       // 失敗時は従来説明のまま（PATCH しない）。マーカーと環境は buildDescriptionV3 が維持する
       if (issueKey && prompt && summary) {
         await deps.adapter.updateDescription(issueKey, await buildDescriptionV3(ev, deps, prompt, summary));
       }
-      // 逸脱検知の基準を確定: この課題をアクティブにし、原タスク = 初回プロンプト、進捗 = 空で開始。
-      // （以降のターンで classifyDivergence が originalTask との乖離を判定する素材になる）
-      if (issueKey) {
-        await store.withLock(ev.sessionId, (s) => {
-          s.activeIssueKey = issueKey;
-          if (s.originalTask === undefined) s.originalTask = prompt || s.initialPrompt;
-          if (s.progress === undefined) s.progress = [];
-        });
-        st.activeIssueKey = issueKey;
-        if (st.originalTask === undefined) st.originalTask = prompt || st.initialPrompt;
-        if (st.progress === undefined) st.progress = [];
-      }
       return {};
+    }
+
+    // resume/既存セッションの自己修復: 課題は確立済（issueKey 有り）なのに originalTask か
+    // activeIssueKey が欠落しているなら、ここで backfill/align する（G23 改訂 F1+F2）。本番で
+    // Stop 遅延作成経路を通ったセッションは seed されているはずだが、旧バージョンで作られた state は
+    // 欠落している。activeIssueKey を issueKey へ揃えることで F2 ガードの分割先も確定する。
+    if (st.originalTask === undefined || st.activeIssueKey === undefined) {
+      await backfillOriginalTask(ev, deps, st, prompt);
     }
 
     // 2ターン目以降: 応答済（resolved）→ 再依頼で処理中へフリップ。同値ステータス PATCH は
@@ -81,16 +80,72 @@ export async function runUserPromptSubmit(ev: CanonicalEvent, deps: LifecycleDep
       await store.drain(ev.sessionId, opDrainHandler(deps.adapter, issueKey));
     }
 
-    // 逸脱検知（2ターン目以降・アクティブ課題があり・プロンプトがある時のみ）。
+    // 逸脱検知（2ターン目以降・同期先課題があり・実ユーザープロンプトがある時のみ）。
+    // ガードは activeIssueKey ではなく activeIssueKey ?? issueKey ベース（G23 改訂 F2）:
+    // activeIssueKey 未設定の resume セッションでも、issueKey があれば判定対象にする。
+    // 実ユーザープロンプトに限定する理由（F1 整合）: <task-notification> 等の非ユーザー由来ブロブを
+    // 判定にかけると originalTask と無関係扱い→誤分割し、originalTask をブロブで上書きしてしまう。
     // 判定 backend は getBackend が常に既定（決定論フォールバック内包）を返すため未配線でも安全。
     // 構造化更新（課題作成/親子化）は handleDivergence が非ブロッキングに行う。
-    if (prompt && getActiveIssue(st).key) {
+    if (isRealUserPrompt(prompt) && (getActiveIssue(st).key ?? st.issueKey)) {
       await detectAndHandleDivergence(ev, deps, st, prompt);
     }
   } catch {
     // 非ブロッキング: 課題作成・説明更新・状態遷移の失敗でプロンプト処理を止めない
   }
   return {};
+}
+
+/** deps.rest の実体（runtime は BacklogRest）に getIssueDetail があれば叩く。型は PullRest narrow のため runtime 検出する。 */
+async function fetchIssueSummary(deps: LifecycleDeps, issueKey: string): Promise<string | undefined> {
+  const rest = deps.rest as { getIssueDetail?: (k: string) => Promise<{ summary?: string }> } | undefined;
+  if (!rest?.getIssueDetail) return undefined;
+  try {
+    const detail = await rest.getIssueDetail(issueKey);
+    const summary = (detail?.summary ?? "").trim();
+    return summary || undefined;
+  } catch {
+    return undefined; // 取得失敗は非ブロッキング（summary 無しで続行）
+  }
+}
+
+/**
+ * resume/既存セッションの自己修復: issueKey 有りで originalTask か activeIssueKey が欠落しているとき
+ * 両者を補修する（G23 改訂 F1+F2）。呼び出し条件は「originalTask undefined または activeIssueKey undefined」。
+ *
+ * originalTask のソース優先:
+ *   ① 現在の実ユーザープロンプト（isRealUserPrompt: task-notification 等の非ユーザー由来ブロブを除外）
+ *   ② 課題 summary（rest.getIssueDetail(issueKey).summary。G23 で追加済み）
+ *   ③ いずれも無ければ st.initialPrompt（実プロンプトとみなせる場合のみ）
+ *
+ * 併せて activeIssueKey が未設定なら issueKey に揃え（F2 ガードと整合）、progress を [] で初期化する。
+ * 一度設定したら以後固定（independent 逸脱時のみ更新は detectAndHandleDivergence の既存ロジック）。
+ */
+async function backfillOriginalTask(
+  ev: CanonicalEvent,
+  deps: LifecycleDeps,
+  st: SessionState,
+  prompt: string,
+): Promise<void> {
+  const issueKey = st.issueKey;
+  if (!issueKey) return;
+
+  // ① 現在の実ユーザープロンプトを最優先（無ければ undefined を渡して summary フォールバックへ）
+  const candidate = isRealUserPrompt(prompt) ? prompt : undefined;
+  // ② 課題 summary（rest が getIssueDetail を持つ runtime のみ。テスト/PullRest narrow では undefined）
+  const summary = await fetchIssueSummary(deps, issueKey);
+  // ③ どちらも無ければ initialPrompt（実プロンプトと判定できる場合のみ deriveOriginalTask が拾う）
+  const original =
+    deriveOriginalTask(candidate, summary) ?? deriveOriginalTask(st.initialPrompt, undefined);
+
+  await deps.store.withLock(ev.sessionId, (s) => {
+    if (s.activeIssueKey === undefined) s.activeIssueKey = issueKey;
+    if (s.originalTask === undefined && original !== undefined) s.originalTask = original;
+    if (s.progress === undefined) s.progress = [];
+  });
+  if (st.activeIssueKey === undefined) st.activeIssueKey = issueKey;
+  if (st.originalTask === undefined && original !== undefined) st.originalTask = original;
+  if (st.progress === undefined) st.progress = [];
 }
 
 /**

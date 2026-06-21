@@ -6,6 +6,7 @@ import { defaultGitOps } from "../vcs/git.js";
 import { repoUrl } from "../vcs/linker.js";
 import { renderer } from "../markup.js";
 import { runPull, formatDigest, type PullRest } from "../inbound/pull.js";
+import { deriveOriginalTask } from "../issue/original-task.js";
 
 export interface LifecycleDeps {
   store: StateStore;
@@ -164,6 +165,38 @@ async function resolveFieldOverrides(ev: CanonicalEvent, deps: LifecycleDeps, st
 }
 
 /**
+ * 課題が確立した時点（経路を問わず）に、逸脱判定の前提となる activeIssueKey と originalTask を seed する。
+ *
+ * G23 改訂 F1（主因修正）: 従来これらは UserPromptSubmit の `!st.issueKey` 初回ブロックでしか書かれず、
+ * 本番では実際の課題作成が Stop の遅延 ensureSessionIssue 経路で起きるため永久に undefined だった。
+ * → activeIssueKey 依存の逸脱ガードが常に false になり classifyDivergence が一度も呼ばれない。
+ * 本ヘルパを課題確立の全経路（マーカー再照合 / 新規作成）から呼ぶことで確実に seed する。
+ *
+ * - activeIssueKey は常に issueKey に揃える（同期先課題が即アクティブ）。
+ * - originalTask は未設定時のみ seed する（一度入れたら independent 逸脱時のみ更新＝既存ロジック不可侵）。
+ *   素材: 実ユーザープロンプト（task-notification 等の非ユーザー由来ブロブは除外）→ 無ければ課題件名。
+ */
+async function seedActiveIssueAndOriginalTask(
+  ev: CanonicalEvent,
+  deps: LifecycleDeps,
+  st: SessionState,
+  issueKey: string,
+  issueSummary: string,
+): Promise<void> {
+  const candidate = ev.prompt ?? st.initialPrompt;
+  const original = deriveOriginalTask(candidate, issueSummary);
+  await deps.store.withLock(ev.sessionId, (s) => {
+    s.activeIssueKey = issueKey;
+    if (s.originalTask === undefined && original !== undefined) s.originalTask = original;
+    if (s.progress === undefined) s.progress = [];
+  });
+  // 呼出元スナップショットにも反映（同一ターンの後続処理が即参照できるように）
+  st.activeIssueKey = issueKey;
+  if (st.originalTask === undefined && original !== undefined) st.originalTask = original;
+  if (st.progress === undefined) st.progress = [];
+}
+
+/**
  * セッション課題の find-or-create。優先順: state.issueKey → マーカー検索 → 新規作成。
  * issueTypeId/priorityId 未解決（init 未実行）の場合は作成せず undefined を返す。
  * UserPromptSubmit が主経路。SessionStart/UserPromptSubmit が発火しない環境
@@ -178,15 +211,18 @@ export async function ensureSessionIssue(ev: CanonicalEvent, deps: LifecycleDeps
   if (found) {
     await deps.store.withLock(ev.sessionId, (s) => { s.issueKey = found.issueKey; s.issueId = found.id; });
     st.issueKey = found.issueKey; st.issueId = found.id;
+    // 再照合経路でも逸脱判定の前提を seed（件名は found.summary、無ければ buildIssueSummary）
+    await seedActiveIssueAndOriginalTask(ev, deps, st, found.issueKey, found.summary ?? buildIssueSummary(ev, st));
     return found.issueKey;
   }
 
   const git = deps.git ?? defaultGitOps;
   const branch = await git.branchName(deps.root ?? ev.cwd);
   const overrides = await resolveFieldOverrides(ev, deps, st);
+  const summary = buildIssueSummary(ev, st);
   const ref = await deps.adapter.createIssue({
     projectId: deps.projectId,
-    summary: buildIssueSummary(ev, st),
+    summary,
     issueTypeId: deps.issueTypeId,
     priorityId: deps.priorityId,
     description: buildIssueDescription(ev, st, deps, branch),
@@ -198,6 +234,8 @@ export async function ensureSessionIssue(ev: CanonicalEvent, deps: LifecycleDeps
   // 「作業を開始しました」コメントは投稿しない（G20: 説明と処理中ステータスで十分・ノイズ削減）
   await deps.adapter.setStatus(ref.issueKey, st.statusMap.in_progress, undefined);
   st.issueKey = ref.issueKey; st.issueId = ref.id; // 呼出元のスナップショットにも反映
+  // 新規作成経路で逸脱判定の前提を seed（件名は作成に使った summary）
+  await seedActiveIssueAndOriginalTask(ev, deps, st, ref.issueKey, summary);
   return ref.issueKey;
 }
 

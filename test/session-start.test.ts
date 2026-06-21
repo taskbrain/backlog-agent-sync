@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore } from "../src/state/store.js";
-import { runSessionStart, sessionMarker } from "../src/lifecycle/session-start.js";
+import { runSessionStart, sessionMarker, ensureSessionIssue } from "../src/lifecycle/session-start.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "bas-")); });
@@ -90,5 +90,81 @@ describe("runSessionStart", () => {
     } as any;
     const out = await runSessionStart(ev, { store, adapter, projectId: 10, issueTypeId: 4236190, priorityId: 3, rest });
     expect(out.additionalContext).toContain("初回プロンプト"); // コンテキスト返却は成功
+  });
+});
+
+// ---- G23 改訂 F1: ensureSessionIssue が課題確立時に originalTask / activeIssueKey を seed する ----
+
+describe("ensureSessionIssue seeding（F1）", () => {
+  // Stop 遅延作成相当（prompt 無しイベント）。seed の素材は ev.prompt → st.initialPrompt → 課題件名。
+  const stopEv = { tool: "claude", event: "stop", sessionId: "s1", cwd: "/repo", raw: {} } as const;
+  const depsBase = { projectId: 10, issueTypeId: 4236190, priorityId: 3 };
+
+  it("新規作成経路: activeIssueKey=issueKey / progress=[] を seed し、originalTask は実プロンプトから導出する", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    await store.withLock("s1", (s) => {
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.initialPrompt = "ログインバグを直して";
+    });
+    const st = await store.loadOrCreate("s1");
+    await ensureSessionIssue(stopEv, { store, adapter, ...depsBase }, st);
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    const saved = await store.loadOrCreate("s1");
+    expect(saved.issueKey).toBe("PROJ-100");
+    expect(saved.activeIssueKey).toBe("PROJ-100"); // F1: activeIssueKey が seed される
+    expect(saved.originalTask).toBe("ログインバグを直して"); // 実プロンプト由来
+    expect(saved.progress).toEqual([]);
+    // 呼出元スナップショットにも反映
+    expect(st.activeIssueKey).toBe("PROJ-100");
+    expect(st.originalTask).toBe("ログインバグを直して");
+  });
+
+  it("ev.prompt を最優先で originalTask に採用する（Stop 経路で prompt が乗る場合）", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    await store.withLock("s1", (s) => {
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.initialPrompt = "古い初回プロンプト";
+    });
+    const st = await store.loadOrCreate("s1");
+    const evWithPrompt = { ...stopEv, prompt: "実ユーザーの依頼です" } as const;
+    await ensureSessionIssue(evWithPrompt, { store, adapter, ...depsBase }, st);
+    const saved = await store.loadOrCreate("s1");
+    expect(saved.originalTask).toBe("実ユーザーの依頼です"); // ev.prompt 優先
+  });
+
+  it("マーカー再照合経路でも activeIssueKey / originalTask を seed する（found.summary を件名に使う）", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    adapter.findByMarker.mockResolvedValue({ id: 100, issueKey: "PROJ-100", summary: "文字起こしを元に設計をまとめる" });
+    await store.withLock("s1", (s) => {
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.initialPrompt = "<system-reminder>noise</system-reminder>"; // 実プロンプト不可 → summary へ
+    });
+    const st = await store.loadOrCreate("s1");
+    await ensureSessionIssue(stopEv, { store, adapter, ...depsBase }, st);
+    expect(adapter.createIssue).not.toHaveBeenCalled(); // 再照合のみ
+    const saved = await store.loadOrCreate("s1");
+    expect(saved.issueKey).toBe("PROJ-100");
+    expect(saved.activeIssueKey).toBe("PROJ-100");
+    // 実プロンプト不可 → found.summary（クリーンな件名）へフォールバック。ブロブは混入しない。
+    expect(saved.originalTask).toBe("文字起こしを元に設計をまとめる");
+    expect(saved.originalTask).not.toContain("system-reminder");
+  });
+
+  it("既に originalTask がある場合は seed で上書きしない（一度設定したら固定）", async () => {
+    const store = new StateStore(dir);
+    const adapter = fakeAdapter();
+    await store.withLock("s1", (s) => {
+      s.statusMap = { open: 1, in_progress: 2, resolved: 3, closed: 4 };
+      s.initialPrompt = "新しい依頼";
+      s.originalTask = "既存の原タスク"; // 既設定（disk に永続化）
+    });
+    const st = await store.loadOrCreate("s1");
+    await ensureSessionIssue(stopEv, { store, adapter, ...depsBase }, st);
+    const saved = await store.loadOrCreate("s1");
+    expect(saved.originalTask).toBe("既存の原タスク"); // 不変
+    expect(saved.activeIssueKey).toBe("PROJ-100"); // activeIssueKey は常に揃える
   });
 });

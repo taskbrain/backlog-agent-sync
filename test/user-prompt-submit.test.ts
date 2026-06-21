@@ -67,7 +67,9 @@ describe("runUserPromptSubmit", () => {
     });
     const adapter = fakeAdapter();
     const long = "追加でテストも書いて ".repeat(20);
-    await runUserPromptSubmit(promptEv(long), { store, adapter: adapter as any, ...deps });
+    // G23 改訂 F2: issueKey 有り（activeIssueKey 無し）でも逸脱判定が走るようになったため、
+    // CLI 起動を避けるべく決定論 backend を明示注入する（この test の主眼は status flip）。
+    await runUserPromptSubmit(promptEv(long), { store, adapter: adapter as any, ...detDeps });
     expect(adapter.createIssue).not.toHaveBeenCalled();
     expect(adapter.setStatus).toHaveBeenCalledWith("PROJ-1", 2, undefined); // resolved → in_progress
     const st = await store.loadOrCreate("s1");
@@ -84,7 +86,8 @@ describe("runUserPromptSubmit", () => {
       s.lastStatus = "in_progress";
     });
     const adapter = fakeAdapter();
-    await runUserPromptSubmit(promptEv("続けて"), { store, adapter: adapter as any, ...deps });
+    // F2: issueKey 有りで逸脱判定が走るため決定論 backend を注入（"続けて" は短く in_scope）。
+    await runUserPromptSubmit(promptEv("続けて"), { store, adapter: adapter as any, ...detDeps });
     expect(adapter.setStatus).not.toHaveBeenCalled();
     const st = await store.loadOrCreate("s1");
     expect(st.lastPrompt).toBe("続けて"); // 記録はされる
@@ -200,12 +203,13 @@ describe("runUserPromptSubmit", () => {
     });
     const adapter = fakeAdapter();
     const summarize = vi.fn().mockResolvedValue("追加対応\n- テストも書く");
-    await runUserPromptSubmit(promptEv("追加でテストも書いて"), { store, adapter: adapter as any, ...deps, summarize });
+    // F2: issueKey 有りで逸脱判定が走るため決定論 backend を注入（主眼は lastPromptSummary の上書き）。
+    await runUserPromptSubmit(promptEv("追加でテストも書いて"), { store, adapter: adapter as any, ...detDeps, summarize });
     let st = await store.loadOrCreate("s1");
     expect(st.lastPromptSummary).toBe("追加対応\n- テストも書く");
 
     const failing = vi.fn().mockRejectedValue(new Error("llm error"));
-    await runUserPromptSubmit(promptEv("さらに追加"), { store, adapter: adapter as any, ...deps, summarize: failing });
+    await runUserPromptSubmit(promptEv("さらに追加"), { store, adapter: adapter as any, ...detDeps, summarize: failing });
     st = await store.loadOrCreate("s1");
     expect(st.lastPromptSummary).toBeUndefined(); // 残骸が残らない（stop は原文へフォールバック）
     expect(st.lastPrompt).toBe("さらに追加");
@@ -407,5 +411,101 @@ describe("runUserPromptSubmit", () => {
     expect(adapter.createIssue).not.toHaveBeenCalled(); // id 未解決 → no-op
     const st = await store.loadOrCreate("s1");
     expect(st.activeIssueKey).toBe("PROJ-50"); // 切替なし
+  });
+
+  // ---- G23 改訂 F1: resume/既存セッションの originalTask backfill ----
+
+  it("backfill: issueKey 有り・originalTask undefined のとき実ユーザープロンプトから originalTask を埋める", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.lastStatus = "in_progress";
+      // activeIssueKey も originalTask も無い旧 state（Stop 遅延作成で seed されなかった）
+    });
+    const adapter = fakeAdapter();
+    await runUserPromptSubmit(promptEv("認証フローのリファクタを進めて"), { store, adapter: adapter as any, ...detDeps });
+    const st = await store.loadOrCreate("s1");
+    expect(st.originalTask).toBe("認証フローのリファクタを進めて"); // ① 実プロンプト由来
+    expect(st.activeIssueKey).toBe("PROJ-1"); // F2 整合: activeIssueKey も揃える
+    expect(st.progress).toEqual([]);
+  });
+
+  it("backfill: プロンプトが非ユーザー由来ブロブなら rest.getIssueDetail の summary へフォールバック", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.lastStatus = "in_progress";
+    });
+    const adapter = fakeAdapter();
+    // runtime の BacklogRest 相当（getIssueDetail を持つ）。PullRest narrow を runtime 検出で叩く。
+    const rest = {
+      getMyself: vi.fn(),
+      findIssues: vi.fn(),
+      getComments: vi.fn(),
+      getIssueDetail: vi.fn().mockResolvedValue({ id: 1, issueKey: "PROJ-1", summary: "課題の件名タスク", description: "" }),
+    } as any;
+    const blob = "<task-notification>通知本文のみ</task-notification>";
+    await runUserPromptSubmit(promptEv(blob), { store, adapter: adapter as any, ...detDeps, rest });
+    expect(rest.getIssueDetail).toHaveBeenCalledWith("PROJ-1");
+    const st = await store.loadOrCreate("s1");
+    expect(st.originalTask).toBe("課題の件名タスク"); // ② summary フォールバック
+  });
+
+  it("backfill は一度設定したら固定（originalTask + activeIssueKey 既設定なら再 backfill しない）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.lastStatus = "in_progress";
+      s.activeIssueKey = "PROJ-1"; // activeIssueKey も既設定 → 自己修復経路に入らない
+      s.originalTask = "ログイン機能のバグ修正タスク"; // 既設定
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    const rest = { getMyself: vi.fn(), findIssues: vi.fn(), getComments: vi.fn(), getIssueDetail: vi.fn() } as any;
+    // 継続依頼（originalTask と語彙が重なる）→ in_scope。originalTask は上書きされない。
+    await runUserPromptSubmit(promptEv("ログイン機能のテストも追加して"), { store, adapter: adapter as any, ...detDeps, rest });
+    expect(rest.getIssueDetail).not.toHaveBeenCalled(); // 既設定なので backfill 経路に入らない
+    const st = await store.loadOrCreate("s1");
+    expect(st.originalTask).toBe("ログイン機能のバグ修正タスク"); // 不変
+  });
+
+  // ---- G23 改訂 F2: activeIssueKey 未設定でも issueKey で逸脱判定が走る ----
+
+  it("activeIssueKey 未設定でも issueKey があれば classifyDivergence が走る（別件で新課題が作られる）", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正"; // backfill 不要・判定基準あり
+      s.progress = [];
+      // activeIssueKey は未設定（旧 F2 ガードでは判定がスキップされていた）
+    });
+    const adapter = fakeAdapter();
+    adapter.createIssue.mockResolvedValue({ id: 300, issueKey: "PROJ-300" });
+    await runUserPromptSubmit(promptEv("別件: 請求書PDFの出力機能を新規実装したい"), { store, adapter: adapter as any, ...detDeps });
+    // 旧ガード（activeIssueKey 依存）なら createIssue は呼ばれない。F2 で issueKey ベースになり判定が走る。
+    expect(adapter.createIssue).toHaveBeenCalledOnce();
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-300"); // independent で新トピックへ切替
+  });
+
+  it("activeIssueKey 未設定・継続依頼（in_scope）では新課題を作らない", async () => {
+    const store = new StateStore(dir);
+    await store.withLock("s1", (s) => {
+      s.issueKey = "PROJ-1";
+      s.issueId = 1;
+      s.lastStatus = "in_progress";
+      s.originalTask = "ログイン機能のバグ修正を行う";
+      s.progress = [];
+    });
+    const adapter = fakeAdapter();
+    await runUserPromptSubmit(promptEv("ログイン機能のテストも追加して"), { store, adapter: adapter as any, ...detDeps });
+    expect(adapter.createIssue).not.toHaveBeenCalled(); // 判定は走るが in_scope
+    const st = await store.loadOrCreate("s1");
+    expect(st.activeIssueKey).toBe("PROJ-1"); // backfill で issueKey に揃う
   });
 });
