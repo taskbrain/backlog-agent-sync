@@ -280,6 +280,27 @@ export class BacklogRest {
     throw new Error(`Backlog GET /issues/:key/comments -> 429 (リトライ上限)`);
   }
 
+  /**
+   * 課題コメントの取得（cleanup-comments 用の薄い別名）。getComments と同じ
+   * GET /issues/:key/comments?order=asc&count=N を呼ぶが、命名を「コメント取得」
+   * の意図に合わせ、ページング起点の minId を素直に受ける。
+   */
+  async getIssueComments(issueIdOrKey: string | number, opts: { minId?: number; count?: number } = {}): Promise<IssueComment[]> {
+    return this.getComments(issueIdOrKey, opts);
+  }
+
+  /**
+   * 課題コメントの削除（DELETE /issues/:key/comments/:commentId）。
+   * cleanup-comments がツール生成コメントのみを対象に呼ぶ。人間コメントには呼ばない。
+   */
+  async deleteComment(issueIdOrKey: string | number, commentId: number): Promise<void> {
+    await this.request(
+      "DELETE",
+      `/issues/${encodeURIComponent(String(issueIdOrKey))}/comments/${encodeURIComponent(String(commentId))}`,
+      "write",
+    );
+  }
+
   // ---- Wiki / Document（G21: docs 同期。レスポンスは safeJson で安全にパースし必要フィールドのみ返す） ----
 
   /** Wiki 一覧（content は返らない）。 */

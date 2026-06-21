@@ -75,6 +75,12 @@ export interface SessionState {
    * Z(Stop担当）は updateSummary の isMilestone 時に appendMilestone で1行追加し、buildDescription({progress}) を再構築する。
    */
   progress?: string[];
+  /**
+   * 最後に PATCH した説明欄本文の sha256（F4: 差分スキップ用。後方互換 optional）。
+   * Stop は buildDescription した本文のハッシュがこの値と一致するなら updateDescription を呼ばない。
+   * 不一致時のみ PATCH してこの値を更新する。無変更ターンの説明変更ログを抑制する。
+   */
+  lastDescriptionHash?: string;
 }
 
 export interface BacklogConfig {

@@ -35,7 +35,7 @@ function parseJudgmentChoice(v: string | undefined): JudgmentChoice | undefined 
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [cmd, ...rest] = argv;
-  const known = ["hook", "init", "seed", "pull", "status", "flush", "docs", "backfill-summary"];
+  const known = ["hook", "init", "seed", "pull", "status", "flush", "docs", "backfill-summary", "cleanup-comments"];
   if (!cmd || !known.includes(cmd)) return { cmd: "help" };
   if (cmd === "hook") return { cmd, event: rest[0] as LifecycleEvent };
   if (cmd === "init") {
@@ -67,7 +67,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (i >= 0 && rest[i + 1]) out.sessionId = rest[i + 1];
     return out;
   }
-  if (cmd === "backfill-summary") {
+  if (cmd === "backfill-summary" || cmd === "cleanup-comments") {
     const out: ParsedArgs = { cmd, dryRun: rest.includes("--dry-run") };
     // 課題キーは最初の非フラグ位置引数（--dry-run 等のフラグは除く）。
     const key = rest.find((a) => !a.startsWith("--"));
@@ -108,7 +108,7 @@ export async function main(argv: string[]): Promise<void> {
   // APIキー混入の告知（1回）。再帰起動された claude -p 子プロセス（BACKLOG_SYNC_IN_HOOK=1）では出さない。
   if (!process.env.BACKLOG_SYNC_IN_HOOK) warnIfApiKeyPresent();
   if (parsed.cmd === "help") {
-    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic] [--judgment default|haiku|sonnet|opus|fable|deterministic|auto]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|backfill-summary <issueKey> [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
+    process.stdout.write("backlog-sync <init [--vcs github|backlog|generic] [--judgment default|haiku|sonnet|opus|fable|deterministic|auto]|seed [--plan <file>] [--dry-run]|docs [--dry-run] [--prune] [--recreate] [--target wiki|documents]|backfill-summary <issueKey> [--dry-run]|cleanup-comments <issueKey> [--dry-run]|hook <event>|pull [--session <id>]|status|flush [--session <id>]>\n");
     // --judgment の適用範囲を明示（判定モデルは逸脱検知/ターン要約のみ。初回プロンプト整理は固定 haiku で別軸）。
     process.stdout.write("  --judgment: 判定モデルは逸脱検知/ターン要約に適用。初回プロンプト整理は固定 haiku（別軸・別段階）\n");
     return;
@@ -286,6 +286,33 @@ export async function main(argv: string[]): Promise<void> {
       process.stderr.write(`backfill-summary: ${res.issueKey} の説明本文をプレビュー（dry-run・未書込）\n`);
     } else {
       process.stdout.write(`backfill-summary: ${res.issueKey} の説明欄を現状サマリで再構築しました（コメントは非改変）\n`);
+    }
+    return;
+  }
+  if (parsed.cmd === "cleanup-comments") {
+    if (!parsed.issueKey) {
+      process.stderr.write("backlog-sync: cleanup-comments には課題キーが必要です（例: backlog-sync cleanup-comments PROJ-26 [--dry-run]）\n");
+      return;
+    }
+    const cwd = process.cwd();
+    const { buildRuntime } = await import("./runtime.js");
+    const { rest } = await buildRuntime(cwd);
+    const { cleanupToolComments } = await import("./issue/cleanup.js");
+    // 読み取り（getIssueComments）とツール生成コメントの削除（deleteComment）のみを注入。
+    // 人間コメントは isToolComment が false を返すため構造的に保持される。
+    const res = await cleanupToolComments(
+      {
+        getIssueComments: (k, opts) => rest.getIssueComments(k, opts),
+        deleteComment: (k, id) => rest.deleteComment(k, id),
+      },
+      parsed.issueKey,
+      { dryRun: parsed.dryRun },
+    );
+    if (parsed.dryRun) {
+      for (const c of res.candidates) process.stdout.write(`DELETE? #${c.id} ${c.preview}\n`);
+      process.stdout.write(`cleanup-comments: ${res.issueKey} 削除候補 ${res.candidates.length} 件 / 保持 ${res.kept} 件（dry-run・未削除）\n`);
+    } else {
+      process.stdout.write(`cleanup-comments: ${res.issueKey} ツール生成コメント ${res.deleted} 件を削除（保持 ${res.kept} 件・人間コメントは非改変）\n`);
     }
     return;
   }
