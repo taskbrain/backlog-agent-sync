@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { resolveConfig, stateDirFor, projectConfigPath, resolveJudgmentConfig } from "./config.js";
+import { resolveConfig, stateDirFor, projectConfigPath, resolveJudgmentConfig, resolveStaleSweepConfig } from "./config.js";
 import { StateStore } from "./state/store.js";
 import { BacklogRest } from "./tracker/backlog-rest.js";
 import { BacklogAdapter } from "./tracker/backlog-adapter.js";
@@ -24,6 +24,8 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
   let summarize: LifecycleDeps["summarize"];
   // judgment は project.json 未解決時も既定（backend=auto）へ正規化する（getBackend が常に有効な backend を受け取る）
   let judgment: LifecycleDeps["judgment"] = resolveJudgmentConfig(undefined);
+  // staleSweep は project.json 未解決時も既定（enabled=true / thresholdHours=24）へ正規化する
+  let staleSweepCfg = resolveStaleSweepConfig(undefined);
   try {
     const raw = await readFile(projectConfigPath(cwd), "utf8");
     const pj = JSON.parse(raw) as ProjectCache;
@@ -38,6 +40,7 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
     if (pj.fieldRules?.summarize !== "off") summarize = (prompt) => summarizeRequest(prompt);
     // ユーザーが init で選んだ判定 backend/model を本番ハンドラ（user-prompt-submit / stop）へ伝播する
     judgment = resolveJudgmentConfig(pj.judgment);
+    staleSweepCfg = resolveStaleSweepConfig(pj.staleSweep);
   } catch {
     // project.json 未作成: env または未解決にフォールバック（judgment は既定 backend=auto のまま）
   }
@@ -48,6 +51,13 @@ export async function buildRuntime(cwd: string): Promise<{ deps: LifecycleDeps; 
       process.stderr.write(`backlog-sync: 課題id解決に失敗(${issueKey}): ${e?.message ?? e}\n`);
       return undefined;
     });
-  const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest, vcs, textFormattingRule, resolutionFixedId, root: cwd, fields, summarize, judgment, getIssueId };
+  // SessionStart の放置課題スイープ deps（adapter が StaleSweepRest.setStatus を満たす。state dir は store と同一）。
+  const staleSweep: LifecycleDeps["staleSweep"] = {
+    enabled: staleSweepCfg.enabled,
+    thresholdMs: staleSweepCfg.thresholdHours * 3_600_000,
+    stateDir: stateDirFor(cwd),
+    rest: adapter,
+  };
+  const deps: LifecycleDeps = { store, adapter, projectId, issueTypeId, priorityId, rest, vcs, textFormattingRule, resolutionFixedId, root: cwd, fields, summarize, judgment, getIssueId, staleSweep };
   return { deps, rest, projectKey: cfg.projectKey };
 }

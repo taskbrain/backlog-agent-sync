@@ -81,6 +81,12 @@ export interface SessionState {
    * 不一致時のみ PATCH してこの値を更新する。無変更ターンの説明変更ログを抑制する。
    */
   lastDescriptionHash?: string;
+  /**
+   * SessionStart の stale スイープで「処理済み」へ解消済みであることを示すフラグ（後方互換 optional）。
+   * 異常終了で SessionEnd が発火せず in_progress のまま残ったセッションを次回 SessionStart で
+   * 保守的に解消した際に立てる。立っている state ファイルは二度とスイープ対象にしない（二重処理防止）。
+   */
+  staleSwept?: boolean;
 }
 
 export interface BacklogConfig {
@@ -145,6 +151,17 @@ export interface DocsNamingConfig {
   stripTitleSuffix?: string[]; // H1 由来タイトル末尾の共通サフィックスを除去。複数該当は最長一致。除去後が空になる場合は除去しない
 }
 
+/**
+ * project.json `staleSweep`（SessionStart 時の放置課題スイープ設定）。
+ * 異常終了（クラッシュ/ハードキル）で SessionEnd が発火せず in_progress のまま残った
+ * 課題を、次回 SessionStart で保守的に「処理済み」へ解消する。
+ * 既定: enabled=true / thresholdHours=24（後方互換 optional）。
+ */
+export interface StaleSweepConfig {
+  enabled?: boolean; // 既定 true
+  thresholdHours?: number; // 既定 24。これ以上更新が無い state ファイルだけを放置とみなす
+}
+
 /** project.json `docsSync`（docs → Backlog Wiki/Document 同期の設定。G21）。 */
 export interface DocsSyncConfig {
   target?: "wiki" | "documents"; // 既定 "wiki"（更新可能）。documents はワンショット投入（更新 API 不在）
@@ -175,6 +192,7 @@ export interface ProjectCache {
   fieldRules?: FieldRules;
   judgment?: JudgmentConfig;
   docsSync?: DocsSyncConfig;
+  staleSweep?: StaleSweepConfig;
   resolvedAt?: string;
 }
 

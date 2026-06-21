@@ -7,6 +7,7 @@ import { repoUrl } from "../vcs/linker.js";
 import { renderer } from "../markup.js";
 import { runPull, formatDigest, type PullRest } from "../inbound/pull.js";
 import { deriveOriginalTask } from "../issue/original-task.js";
+import { sweepStaleIssues, type StaleSweepRest } from "./stale-sweep.js";
 
 export interface LifecycleDeps {
   store: StateStore;
@@ -32,6 +33,17 @@ export interface LifecycleDeps {
    * 未注入時は state.issueId（active がセッション主課題と一致する場合のみ）で解決する。
    */
   getIssueId?: (issueKey: string) => Promise<number | undefined>;
+  /**
+   * SessionStart 時の放置課題スイープ設定（すべて optional・後方互換。未注入ならスイープしない）。
+   * 異常終了で SessionEnd が発火せず in_progress のまま残った課題を保守的に resolved へ遷移させる。
+   * runtime が project.json から解決した enabled/thresholdMs と、state ディレクトリ・REST 面を供給する。
+   */
+  staleSweep?: {
+    enabled: boolean;
+    thresholdMs: number;
+    stateDir: string;
+    rest: StaleSweepRest;
+  };
 }
 
 export interface HookOutput { additionalContext?: string; }
@@ -255,6 +267,26 @@ export async function runSessionStart(ev: CanonicalEvent, deps: LifecycleDeps): 
   const statusMap = await adapter.getStatusMap();
   // 後続フック（UserPromptSubmit/Stop）の課題作成・状態遷移が最新の statusMap を使えるよう保存
   const st = await store.withLock(ev.sessionId, (s) => { s.statusMap = statusMap; return s; });
+
+  // 異常終了で SessionEnd が発火せず in_progress のまま残った課題を保守的に解消する（best-effort・非ブロッキング）。
+  // 現在のセッションは除外。失敗しても SessionStart を止めない。
+  if (deps.staleSweep?.enabled) {
+    try {
+      await sweepStaleIssues(
+        {
+          stateDir: deps.staleSweep.stateDir,
+          rest: deps.staleSweep.rest,
+          statusMap,
+          resolutionFixedId: deps.resolutionFixedId, // 0「対応済み」も有効（sweep 内で != null 判定）
+          thresholdMs: deps.staleSweep.thresholdMs,
+          now: Date.now(),
+        },
+        ev.sessionId,
+      );
+    } catch {
+      // スイープ失敗はセッション開始を止めない（非ブロッキング原則）
+    }
+  }
 
   if (!st.issueKey && (!deps.issueTypeId || !deps.priorityId)) {
     process.stderr.write("backlog-sync: init未実行（issueTypeId/priorityId 未解決）。課題は作成されません。`backlog-sync init` を実行してください。\n");

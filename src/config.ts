@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { BacklogConfig, JudgmentConfig } from "./types.js";
+import type { BacklogConfig, JudgmentConfig, StaleSweepConfig } from "./types.js";
 
 export function resolveConfig(env: NodeJS.ProcessEnv): BacklogConfig {
   const domain = env.BACKLOG_DOMAIN;
@@ -38,4 +38,17 @@ export function resolveJudgmentConfig(judgment?: JudgmentConfig): Required<Pick<
   const backend = judgment?.backend;
   const normalized = backend === "deterministic" || backend === "claude-p" || backend === "auto" ? backend : "auto";
   return { backend: normalized, model: judgment?.model };
+}
+
+/**
+ * project.json の staleSweep ブロックを既定値で正規化する。
+ * 既定: enabled=true / thresholdHours=24。
+ * 後方互換: 未設定（undefined）はすべて既定で埋める。
+ * thresholdHours は有限の正数のみ採用し、それ以外（NaN/0/負/非数）は既定 24 に丸める（安全側）。
+ */
+export function resolveStaleSweepConfig(staleSweep?: StaleSweepConfig): Required<StaleSweepConfig> {
+  const enabled = staleSweep?.enabled !== false; // 既定 true。明示 false のときだけ無効
+  const raw = staleSweep?.thresholdHours;
+  const thresholdHours = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 24;
+  return { enabled, thresholdHours };
 }
