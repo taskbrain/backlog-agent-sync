@@ -80,6 +80,18 @@ describe("parseArgs", () => {
     expect(parseArgs(["backfill-summary", "--dry-run"])).toEqual({ cmd: "backfill-summary", dryRun: true });
     expect(parseArgs(["backfill-summary"])).toEqual({ cmd: "backfill-summary", dryRun: false });
   });
+
+  it("cleanup-comments <issueKey> を解釈する", () => {
+    expect(parseArgs(["cleanup-comments", "TC-26"])).toEqual({ cmd: "cleanup-comments", dryRun: false, issueKey: "TC-26" });
+  });
+  it("cleanup-comments <issueKey> --dry-run を解釈する（順序非依存）", () => {
+    expect(parseArgs(["cleanup-comments", "TC-26", "--dry-run"])).toEqual({ cmd: "cleanup-comments", dryRun: true, issueKey: "TC-26" });
+    expect(parseArgs(["cleanup-comments", "--dry-run", "TC-26"])).toEqual({ cmd: "cleanup-comments", dryRun: true, issueKey: "TC-26" });
+  });
+  it("cleanup-comments はキー無し（--dry-run のみ）でも cmd を保持し issueKey は未設定", () => {
+    expect(parseArgs(["cleanup-comments", "--dry-run"])).toEqual({ cmd: "cleanup-comments", dryRun: true });
+    expect(parseArgs(["cleanup-comments"])).toEqual({ cmd: "cleanup-comments", dryRun: false });
+  });
 });
 
 describe("warnIfApiKeyPresent（APIキー混入の起動時警告）", () => {

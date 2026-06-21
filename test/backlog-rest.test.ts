@@ -301,4 +301,46 @@ describe("BacklogRest（Phase 2: 親子化 / 説明後付け）", () => {
     expect(handle429).toHaveBeenCalledOnce();
     expect(ref.issueKey).toBe("PROJ-9");
   });
+
+  it("getIssueComments は GET /issues/:key/comments?order=asc&count=N を呼び id/content を返す", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes([
+      { id: 21, content: "## ターン #1", createdUser: { id: 9, name: "bot" }, created: "2026-06-10T09:00:00Z" },
+    ]));
+    const rest = restWith(fetchMock);
+    const comments = await rest.getIssueComments("PROJ-26", { count: 50 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/issues/PROJ-26/comments");
+    expect(String(url)).toContain("order=asc");
+    expect(String(url)).toContain("count=50");
+    expect((init as RequestInit)?.method ?? "GET").toBe("GET"); // body 無し = GET
+    expect(comments[0]).toMatchObject({ id: 21, content: "## ターン #1" });
+  });
+
+  it("deleteComment は DELETE /issues/:key/comments/:commentId を呼ぶ", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ id: 21 }));
+    const rest = restWith(fetchMock);
+    await rest.deleteComment("PROJ-26", 21);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/issues/PROJ-26/comments/21");
+    expect((init as RequestInit).method).toBe("DELETE");
+  });
+
+  it("deleteComment は数値の issueId も URL エンコードして送る", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({}));
+    const rest = restWith(fetchMock);
+    await rest.deleteComment(12345, 99);
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v2/issues/12345/comments/99");
+  });
+
+  it("deleteComment は 429 後にリトライする", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonRes({ errors: [] }, 429, { "X-RateLimit-Reset": "0" }))
+      .mockResolvedValueOnce(jsonRes({ id: 21 }));
+    const handle429 = vi.fn().mockResolvedValue(undefined);
+    const rest = new BacklogRest(cfg, { fetch: fetchMock, rateLimiter: { beforeRequest: async () => {}, handle429 } as any });
+    await rest.deleteComment("PROJ-26", 21);
+    expect(handle429).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
