@@ -113,10 +113,18 @@ async function fetchIssueSummary(deps: LifecycleDeps, issueKey: string): Promise
  * resume/既存セッションの自己修復: issueKey 有りで originalTask か activeIssueKey が欠落しているとき
  * 両者を補修する（G23 改訂 F1+F2）。呼び出し条件は「originalTask undefined または activeIssueKey undefined」。
  *
- * originalTask のソース優先:
- *   ① 現在の実ユーザープロンプト（isRealUserPrompt: task-notification 等の非ユーザー由来ブロブを除外）
- *   ② 課題 summary（rest.getIssueDetail(issueKey).summary。G23 で追加済み）
- *   ③ いずれも無ければ st.initialPrompt（実プロンプトとみなせる場合のみ）
+ * originalTask のソース優先（backfill 専用 = 課題件名優先）:
+ *   ① 課題 summary（rest.getIssueDetail(issueKey).summary）= resume しても変わらない「原タスク」
+ *   ② st.initialPrompt（実ユーザープロンプトと判定できる場合のみ）
+ *   ③ いずれも無ければ現在の実ユーザープロンプト（最終手段）
+ *
+ * 【seed 経路（session-start.ts seedActiveIssueAndOriginalTask）との差異・重要】
+ * 新規セッションの seed は「初回プロンプト優先 → 件名フォールバック」のままにする
+ * （新規は初回プロンプト = 原タスクが正しい）。本 backfill 経路のみ優先順を逆転させる理由:
+ * resume 直後の 1 ターン目に「今回プロンプト」を originalTask に入れてしまうと、直後の
+ * classifyDivergence が「プロンプト vs それ自身」を比較して必ず in_scope に倒れ、別作業でも
+ * 1 ターン目が分割されない。課題件名（安定した原タスク）を基準に持つことで、resume 1 ターン目の
+ * 別トピックプロンプトでも divergent 判定が効く。
  *
  * 併せて activeIssueKey が未設定なら issueKey に揃え（F2 ガードと整合）、progress を [] で初期化する。
  * 一度設定したら以後固定（independent 逸脱時のみ更新は detectAndHandleDivergence の既存ロジック）。
@@ -130,13 +138,18 @@ async function backfillOriginalTask(
   const issueKey = st.issueKey;
   if (!issueKey) return;
 
-  // ① 現在の実ユーザープロンプトを最優先（無ければ undefined を渡して summary フォールバックへ）
-  const candidate = isRealUserPrompt(prompt) ? prompt : undefined;
-  // ② 課題 summary（rest が getIssueDetail を持つ runtime のみ。テスト/PullRest narrow では undefined）
+  // ① 課題 summary を最優先（rest が getIssueDetail を持つ runtime のみ。テスト/PullRest narrow では undefined）。
+  //    deriveOriginalTask に candidate=undefined を渡すと summary が採用される。
   const summary = await fetchIssueSummary(deps, issueKey);
-  // ③ どちらも無ければ initialPrompt（実プロンプトと判定できる場合のみ deriveOriginalTask が拾う）
+  // ③ summary も initialPrompt も使えない場合の最終手段（現在の実ユーザープロンプト）
+  const currentPrompt = isRealUserPrompt(prompt) ? prompt : undefined;
   const original =
-    deriveOriginalTask(candidate, summary) ?? deriveOriginalTask(st.initialPrompt, undefined);
+    // ①課題件名（候補は渡さず summary を主役にする）
+    deriveOriginalTask(undefined, summary) ??
+    // ②initialPrompt（実ユーザープロンプトと判定できる場合のみ拾われる）
+    deriveOriginalTask(st.initialPrompt, undefined) ??
+    // ③最終手段: 現在の実ユーザープロンプト
+    deriveOriginalTask(currentPrompt, undefined);
 
   await deps.store.withLock(ev.sessionId, (s) => {
     if (s.activeIssueKey === undefined) s.activeIssueKey = issueKey;

@@ -96,6 +96,25 @@ describe("backfillSummary", () => {
     expect(res2.body).toContain("件名タスク");
   });
 
+  it("Backlog 記法見出し（* タスク）の既存説明からもタスクを抽出する（markdown 非対称の解消）", async () => {
+    // Backlog 記法で作られた既存説明は ## ではなく ** が見出しに使われる。
+    // markdown 専用だと ## タスク を取りこぼし件名へ無駄に落ちるため、両記法対応を確認する。
+    const deps = makeDeps({
+      getIssueDetail: vi.fn(async () => ({
+        id: 30,
+        issueKey: "TC-30",
+        summary: "件名（フォールバック先）",
+        description: "** タスク\n文字起こしを元に設計をまとめる\n\n** 最新状況\n旧サマリ",
+      })) as any,
+      // Backlog 記法本文を生成すると ** タスク 見出しで出力されるため本文側の見出し検証は記法非依存に行う
+      textFormattingRule: "backlog",
+    });
+    const res = await backfillSummary(deps, "TC-30", { dryRun: true });
+    // ** タスク ブロックの本文が原タスクとして引き継がれる（件名ではない）
+    expect(res.body).toContain("文字起こしを元に設計をまとめる");
+    expect(res.body).not.toContain("件名（フォールバック先）");
+  });
+
   it("judgment 失敗時も決定論で本文生成され落ちない", async () => {
     // updateSummary が必ず throw する backend を注入 → 決定論フォールバックで本文を組む
     const throwingBackend = {

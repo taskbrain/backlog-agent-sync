@@ -50,10 +50,16 @@ export interface BackfillResult {
   updated: boolean;
 }
 
-/** 既存説明から ## タスク ブロックを抽出（deterministic backend と対称の見出し基準）。無ければ "". */
+/**
+ * 既存説明から ## タスク ブロックを抽出（deterministic backend と対称の見出し基準）。無ければ "".
+ * markdown 見出し（# タスク）と Backlog 記法見出し（* タスク）の両方に対応する
+ * （extractLatestText が最新状況で markdown/backlog 両対応なのと対称。Backlog 記法で作られた
+ * 既存説明では ## ではなく ** が使われるため、片側だけだとタスクを取りこぼし件名へ無駄に落ちる）。
+ */
 const TASK_RE = /(?:^|\n)#{1,6}\s*タスク\s*\n([\s\S]*?)(?=\n#{1,6}\s|\n\*{1,6}\s|$)/;
+const TASK_RE_BACKLOG = /(?:^|\n)\*{1,6}\s*タスク\s*\n([\s\S]*?)(?=\n#{1,6}\s|\n\*{1,6}\s|$)/;
 function extractTask(description: string): string {
-  const m = TASK_RE.exec(description);
+  const m = TASK_RE.exec(description) ?? TASK_RE_BACKLOG.exec(description);
   return m ? m[1]!.trim() : "";
 }
 

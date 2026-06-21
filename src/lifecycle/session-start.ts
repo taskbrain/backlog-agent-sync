@@ -183,17 +183,24 @@ async function seedActiveIssueAndOriginalTask(
   issueKey: string,
   issueSummary: string,
 ): Promise<void> {
-  const candidate = ev.prompt ?? st.initialPrompt;
-  const original = deriveOriginalTask(candidate, issueSummary);
-  await deps.store.withLock(ev.sessionId, (s) => {
-    s.activeIssueKey = issueKey;
-    if (s.originalTask === undefined && original !== undefined) s.originalTask = original;
-    if (s.progress === undefined) s.progress = [];
-  });
-  // 呼出元スナップショットにも反映（同一ターンの後続処理が即参照できるように）
-  st.activeIssueKey = issueKey;
-  if (st.originalTask === undefined && original !== undefined) st.originalTask = original;
-  if (st.progress === undefined) st.progress = [];
+  try {
+    const candidate = ev.prompt ?? st.initialPrompt;
+    const original = deriveOriginalTask(candidate, issueSummary);
+    await deps.store.withLock(ev.sessionId, (s) => {
+      s.activeIssueKey = issueKey;
+      if (s.originalTask === undefined && original !== undefined) s.originalTask = original;
+      if (s.progress === undefined) s.progress = [];
+    });
+    // 呼出元スナップショットにも反映（同一ターンの後続処理が即参照できるように）
+    st.activeIssueKey = issueKey;
+    if (st.originalTask === undefined && original !== undefined) st.originalTask = original;
+    if (st.progress === undefined) st.progress = [];
+  } catch (e) {
+    // seed 失敗は機能上は次ターンの backfill が自己修復するが、ここで握り潰すと沈黙消失して
+    // 「逸脱判定が一度も走らない」状態の原因追跡が困難になる。既存の警告スタイルで 1 行残す。
+    const msg = e instanceof Error ? e.message : String(e);
+    process.stderr.write(`backlog-sync: originalTask seed失敗(${issueKey}): ${msg}\n`);
+  }
 }
 
 /**
